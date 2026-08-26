@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local caches
+*.log
+
+# Bundled FFmpeg binaries are large (~300 MB total).
+# Keep them out of git; users get them from the release zip.
+vendor/ffmpeg/*.exe
+
+# Assets are OK to commit (small icons etc).

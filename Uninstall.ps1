@@ -1,4 +1,4 @@
-# AutoSplit uninstaller — reverses everything Install.ps1 did.
+# AutoSplit uninstaller - reverses everything Install.ps1 did.
 # Per-user; no administrator rights required.
 
 $ErrorActionPreference = "Continue"
@@ -27,30 +27,30 @@ foreach ($ext in ($VIDEO_EXTS + $AUDIO_EXTS)) {
         "HKCU:\Software\Classes\SystemFileAssociations\$ext\shell\AutoSplitMedia"
     )
     foreach ($p in $paths) {
-        if (Test-Path $p) { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $p) { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
     }
 }
-if (Test-Path "HKCU:\Software\Classes\AutoSplitCommands") {
-    Remove-Item -Recurse -Force "HKCU:\Software\Classes\AutoSplitCommands" -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath "HKCU:\Software\Classes\AutoSplitCommands") {
+    Remove-Item -Recurse -Force -LiteralPath "HKCU:\Software\Classes\AutoSplitCommands" -ErrorAction SilentlyContinue
 }
 
 # 3. Remove Start Menu shortcut.
-if (Test-Path $ShortcutFn) {
-    Remove-Item -Force $ShortcutFn -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $ShortcutFn) {
+    Remove-Item -Force -LiteralPath $ShortcutFn -ErrorAction SilentlyContinue
 }
 
 # 4. Remove uninstall registry entry.
 $uninstKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"
-if (Test-Path $uninstKey) {
-    Remove-Item -Recurse -Force $uninstKey -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $uninstKey) {
+    Remove-Item -Recurse -Force -LiteralPath $uninstKey -ErrorAction SilentlyContinue
 }
 
 # 5. Remove installed files.
-if (Test-Path $InstallDir) {
+if (Test-Path -LiteralPath $InstallDir) {
     Write-Host "  Removing $InstallDir" -ForegroundColor DarkGray
     # Delay to let the process handle release.
     Start-Sleep -Milliseconds 300
-    Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force -LiteralPath $InstallDir -ErrorAction SilentlyContinue
 }
 
 Write-Host ""

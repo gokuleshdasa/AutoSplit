@@ -17,7 +17,7 @@ $ShortcutFn = Join-Path $StartMenu "$AppName.lnk"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $Exe  = Join-Path $Here "$AppName.exe"
 
-if (-not (Test-Path $Exe)) {
+if (-not (Test-Path -LiteralPath $Exe)) {
     Write-Host "Cannot find $AppName.exe next to this installer." -ForegroundColor Red
     Write-Host "Expected: $Exe" -ForegroundColor Red
     exit 1
@@ -35,9 +35,9 @@ Get-Process $AppName -ErrorAction SilentlyContinue | ForEach-Object {
 }
 
 # Fresh copy.
-if (Test-Path $InstallDir) {
+if (Test-Path -LiteralPath $InstallDir) {
     Write-Host "  Removing previous install..." -ForegroundColor DarkGray
-    Remove-Item -Recurse -Force $InstallDir
+    Remove-Item -Recurse -Force -LiteralPath $InstallDir
 }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
@@ -65,9 +65,9 @@ $SubShell    = "$SubCmdsRoot\shell"
 # Wipe the old flat entries and prior sub-commands so we start clean.
 foreach ($ext in $AllExts) {
     $parent = "HKCU:\Software\Classes\SystemFileAssociations\$ext\shell\AutoSplitMedia"
-    if (Test-Path $parent) { Remove-Item -Recurse -Force $parent }
+    if (Test-Path -LiteralPath $parent) { Remove-Item -Recurse -Force -LiteralPath $parent }
 }
-if (Test-Path $SubCmdsRoot) { Remove-Item -Recurse -Force $SubCmdsRoot }
+if (Test-Path -LiteralPath $SubCmdsRoot) { Remove-Item -Recurse -Force -LiteralPath $SubCmdsRoot }
 
 # Create the sub-commands.
 $Entries = @(
@@ -75,7 +75,7 @@ $Entries = @(
     @{ Key = "02JoinQuick";  Verb = "Join (Quick)";              MultiSelect = "Player"; Args = '--join-quick "%1"'       },
     @{ Key = "03JoinCustom"; Verb = "Join (Customize)&#8230;";   MultiSelect = "Player"; Args = '--join-custom "%1"'      }
 )
-# Fix up the &#8230; (…) — PowerShell hates the raw glyph in older consoles.
+# Fix up the &#8230; (ellipsis). Raw glyph is avoided so this file stays ASCII.
 foreach ($e in $Entries) { $e.Verb = $e.Verb -replace '&#8230;', [char]0x2026 }
 
 foreach ($e in $Entries) {
@@ -108,7 +108,7 @@ $Shortcut = $WshShell.CreateShortcut($ShortcutFn)
 $Shortcut.TargetPath       = $InstalledExe
 $Shortcut.WorkingDirectory = $InstallDir
 $Shortcut.IconLocation     = $InstalledExe
-$Shortcut.Description      = "AutoSplit — media splitter and joiner"
+$Shortcut.Description      = "AutoSplit - media splitter and joiner"
 $Shortcut.Save()
 
 # --- Uninstall registry entry (visible in Windows "Add or remove programs") ---
@@ -132,5 +132,5 @@ try {
     $ans = Read-Host
     if ($ans -match '^[Yy]') { Start-Process $InstalledExe }
 } catch {
-    # Non-interactive session — skip.
+    # Non-interactive session - skip.
 }

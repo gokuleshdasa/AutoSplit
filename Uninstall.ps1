@@ -34,9 +34,11 @@ if (Test-Path -LiteralPath "HKCU:\Software\Classes\AutoSplitCommands") {
     Remove-Item -Recurse -Force -LiteralPath "HKCU:\Software\Classes\AutoSplitCommands" -ErrorAction SilentlyContinue
 }
 
-# 3. Remove Start Menu shortcut.
-if (Test-Path -LiteralPath $ShortcutFn) {
-    Remove-Item -Force -LiteralPath $ShortcutFn -ErrorAction SilentlyContinue
+# 3. Remove Start Menu shortcuts (both Splitter and Joiner entries).
+foreach ($lnk in @($ShortcutFn, (Join-Path $StartMenu "AutoSplit Joiner.lnk"))) {
+    if (Test-Path -LiteralPath $lnk) {
+        Remove-Item -Force -LiteralPath $lnk -ErrorAction SilentlyContinue
+    }
 }
 
 # 4. Remove uninstall registry entry.

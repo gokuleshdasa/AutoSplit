@@ -23,6 +23,18 @@ if (-not (Test-Path -LiteralPath $Exe)) {
     exit 1
 }
 
+# Refuse to run when the installer's own folder IS the install target - the
+# script would delete its own source before it could copy.
+$HereFull   = (Resolve-Path -LiteralPath $Here).Path.TrimEnd('\')
+$TargetFull = $InstallDir.TrimEnd('\')
+if ($HereFull -ieq $TargetFull) {
+    Write-Host "This installer is already running from the install target." -ForegroundColor Yellow
+    Write-Host "  Location: $HereFull" -ForegroundColor Yellow
+    Write-Host "Run the installer from its original distribution folder, not from" -ForegroundColor Yellow
+    Write-Host "the installed copy - otherwise it would delete its own source files." -ForegroundColor Yellow
+    exit 1
+}
+
 Write-Host "Installing $AppName..." -ForegroundColor Cyan
 Write-Host "  Source: $Here"
 Write-Host "  Target: $InstallDir"
@@ -101,14 +113,26 @@ foreach ($ext in $AllExts) {
     Set-ItemProperty -Path $parent -Name "Icon"                   -Value $InstalledExe
 }
 
-# --- Start Menu shortcut ---
-Write-Host "  Creating Start Menu shortcut..." -ForegroundColor DarkGray
+# --- Start Menu shortcuts (Splitter and Joiner as independent entries) ---
+Write-Host "  Creating Start Menu shortcuts..." -ForegroundColor DarkGray
 $WshShell = New-Object -ComObject WScript.Shell
+
+# Splitter (default AutoSplit launch)
 $Shortcut = $WshShell.CreateShortcut($ShortcutFn)
 $Shortcut.TargetPath       = $InstalledExe
 $Shortcut.WorkingDirectory = $InstallDir
 $Shortcut.IconLocation     = $InstalledExe
-$Shortcut.Description      = "AutoSplit - media splitter and joiner"
+$Shortcut.Description      = "AutoSplit Splitter - cut audio and video files"
+$Shortcut.Save()
+
+# Joiner (same binary, --join-custom flag)
+$JoinerShortcutFn = Join-Path $StartMenu "AutoSplit Joiner.lnk"
+$Shortcut = $WshShell.CreateShortcut($JoinerShortcutFn)
+$Shortcut.TargetPath       = $InstalledExe
+$Shortcut.Arguments        = "--join-custom"
+$Shortcut.WorkingDirectory = $InstallDir
+$Shortcut.IconLocation     = $InstalledExe
+$Shortcut.Description      = "AutoSplit Joiner - combine multiple audio or video files"
 $Shortcut.Save()
 
 # --- Uninstall registry entry (visible in Windows "Add or remove programs") ---

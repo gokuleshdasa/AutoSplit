@@ -113,7 +113,18 @@ def main() -> int:
     dist_dir = ROOT / "dist" / "AutoSplit"
     print(f"Copying build result -> {dist_dir}")
     dist_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(built, dist_dir)
+    # OneDrive can hold locks on files inside the sync root; use robocopy so
+    # existing files are updated rather than requiring a clean create, and
+    # tolerate its 0-7 success range.
+    if sys.platform == "win32":
+        rc = subprocess.call(
+            ["robocopy", str(built), str(dist_dir),
+             "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/MT:8"],
+        )
+        if rc >= 8:
+            _fail(f"robocopy failed (exit {rc})")
+    else:
+        shutil.copytree(built, dist_dir, dirs_exist_ok=True)
 
     # Copy support files into the distribution.
     for f in ("Install.ps1", "Uninstall.ps1", "HELP.md", "README.md"):

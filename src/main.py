@@ -98,6 +98,14 @@ def main() -> int:
     app.setOrganizationName("AutoSplitMedia")
     _set_icon(app)
 
+    # Route via invocation name: when launched as AutoSplitJoiner.exe (a hard
+    # link registered separately in Windows' Open-with list), always open the
+    # joiner regardless of flags. This lets us present Splitter and Joiner as
+    # two distinct Windows apps while sharing one binary.
+    invoked_as = os.path.basename(sys.argv[0]).lower()
+    if invoked_as.startswith("autosplitjoiner"):
+        return _run_join(app, args.path, "custom")
+
     if args.join_custom:
         return _run_join(app, args.path, "custom")
     if args.join_quick:

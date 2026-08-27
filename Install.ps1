@@ -113,6 +113,66 @@ foreach ($ext in $AllExts) {
     Set-ItemProperty -Path $parent -Name "Icon"                   -Value $InstalledExe
 }
 
+# --- Hard link: AutoSplitJoiner.exe -> AutoSplit.exe -----------------------
+# Same bytes on disk (hard link = zero-cost second name for the same file),
+# but Windows' Open-with list keys off the exe name, so two names = two
+# distinct "Open with" entries. main.py routes on argv[0].
+$JoinerExeName = "AutoSplitJoiner.exe"
+$JoinerExe     = Join-Path $InstallDir $JoinerExeName
+if (-not (Test-Path -LiteralPath $JoinerExe)) {
+    try {
+        New-Item -ItemType HardLink -Path $JoinerExe -Target $InstalledExe -ErrorAction Stop | Out-Null
+        Write-Host "  Created hard link: $JoinerExeName -> AutoSplit.exe" -ForegroundColor DarkGray
+    } catch {
+        # Some filesystems (FAT32, some network drives) don't support hard links;
+        # fall back to a plain copy so both names still exist.
+        Write-Host "  Hard link unsupported here; copying binary as $JoinerExeName" -ForegroundColor Yellow
+        Copy-Item -LiteralPath $InstalledExe -Destination $JoinerExe -Force
+    }
+}
+
+# --- 'Open with' registration for both apps -------------------------------
+Write-Host "  Registering 'Open with' entries..." -ForegroundColor DarkGray
+
+function Register-OpenWithApp {
+    param(
+        [string]$ExeName,
+        [string]$ExePath,
+        [string]$FriendlyName,
+        [string]$ExtraArgs = "",
+        [string[]]$Extensions
+    )
+    $appRoot = "HKCU:\Software\Classes\Applications\$ExeName"
+    New-Item -Path $appRoot -Force | Out-Null
+    Set-ItemProperty -Path $appRoot -Name "FriendlyAppName" -Value $FriendlyName
+    Set-ItemProperty -Path $appRoot -Name "IsHostApp"       -Value ""   # marker; empty REG_SZ is fine
+
+    $cmdKey = "$appRoot\shell\open\command"
+    New-Item -Path $cmdKey -Force | Out-Null
+    $cmdLine = if ($ExtraArgs) { "`"$ExePath`" $ExtraArgs `"%1`"" } else { "`"$ExePath`" `"%1`"" }
+    Set-ItemProperty -Path $cmdKey -Name "(Default)" -Value $cmdLine
+
+    # DefaultIcon for the "Open with" list.
+    $iconKey = "$appRoot\DefaultIcon"
+    New-Item -Path $iconKey -Force | Out-Null
+    Set-ItemProperty -Path $iconKey -Name "(Default)" -Value $ExePath
+
+    # SupportedTypes: declares which extensions the app can handle. Each
+    # extension is a value name (empty data). Required for the app to appear
+    # in the "Open with" list for those types.
+    $stKey = "$appRoot\SupportedTypes"
+    New-Item -Path $stKey -Force | Out-Null
+    foreach ($ext in $Extensions) {
+        Set-ItemProperty -Path $stKey -Name $ext -Value ""
+    }
+}
+
+Register-OpenWithApp -ExeName "AutoSplit.exe" -ExePath $InstalledExe `
+    -FriendlyName "AutoSplit" -Extensions $AllExts
+
+Register-OpenWithApp -ExeName $JoinerExeName -ExePath $JoinerExe `
+    -FriendlyName "AutoSplit Joiner" -Extensions $AllExts
+
 # --- Start Menu shortcuts (Splitter and Joiner as independent entries) ---
 Write-Host "  Creating Start Menu shortcuts..." -ForegroundColor DarkGray
 $WshShell = New-Object -ComObject WScript.Shell

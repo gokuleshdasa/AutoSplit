@@ -34,6 +34,14 @@ if (Test-Path -LiteralPath "HKCU:\Software\Classes\AutoSplitCommands") {
     Remove-Item -Recurse -Force -LiteralPath "HKCU:\Software\Classes\AutoSplitCommands" -ErrorAction SilentlyContinue
 }
 
+# 2b. Remove 'Open with' Applications entries.
+foreach ($appExe in @("AutoSplit.exe", "AutoSplitJoiner.exe")) {
+    $appKey = "HKCU:\Software\Classes\Applications\$appExe"
+    if (Test-Path -LiteralPath $appKey) {
+        Remove-Item -Recurse -Force -LiteralPath $appKey -ErrorAction SilentlyContinue
+    }
+}
+
 # 3. Remove Start Menu shortcuts (both Splitter and Joiner entries).
 foreach ($lnk in @($ShortcutFn, (Join-Path $StartMenu "AutoSplit Joiner.lnk"))) {
     if (Test-Path -LiteralPath $lnk) {

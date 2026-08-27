@@ -173,6 +173,30 @@ Register-OpenWithApp -ExeName "AutoSplit.exe" -ExePath $InstalledExe `
 Register-OpenWithApp -ExeName $JoinerExeName -ExePath $JoinerExe `
     -FriendlyName "AutoSplit Joiner" -Extensions $AllExts
 
+# Also add each app to the per-extension OpenWithList — this is what makes
+# the apps show up in the initial 'Open with' picker (not just under
+# 'Look for another app on this PC'). Windows uses this list to build the
+# 'Suggested apps' section of the modern picker.
+foreach ($ext in $AllExts) {
+    $listRoot = "HKCU:\Software\Classes\$ext\OpenWithList"
+    New-Item -Path $listRoot -Force | Out-Null
+    foreach ($n in @("AutoSplit.exe", $JoinerExeName)) {
+        $entry = "$listRoot\$n"
+        # OpenWithList entries are empty keys (no values needed).
+        if (-not (Test-Path -LiteralPath $entry)) {
+            New-Item -Path $entry -Force | Out-Null
+        }
+    }
+}
+
+# Notify the shell that file-association data has changed so Explorer picks
+# up the new 'Open with' entries without needing a sign-out / reboot.
+Add-Type -Namespace Shell32 -Name Notify -MemberDefinition @'
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet=System.Runtime.InteropServices.CharSet.Auto, SetLastError=true)]
+    public static extern void SHChangeNotify(int wEventId, uint uFlags, System.IntPtr dwItem1, System.IntPtr dwItem2);
+'@ -ErrorAction SilentlyContinue
+try { [Shell32.Notify]::SHChangeNotify(0x08000000, 0x0000, [System.IntPtr]::Zero, [System.IntPtr]::Zero) } catch {}
+
 # --- Start Menu shortcuts (Splitter and Joiner as independent entries) ---
 Write-Host "  Creating Start Menu shortcuts..." -ForegroundColor DarkGray
 $WshShell = New-Object -ComObject WScript.Shell

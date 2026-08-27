@@ -42,6 +42,18 @@ foreach ($appExe in @("AutoSplit.exe", "AutoSplitJoiner.exe")) {
     }
 }
 
+# 2c. Remove per-extension OpenWithList entries.
+$VIDEO_EXTS_LIST = @(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+$AUDIO_EXTS_LIST = @(".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus")
+foreach ($ext in ($VIDEO_EXTS_LIST + $AUDIO_EXTS_LIST)) {
+    foreach ($n in @("AutoSplit.exe", "AutoSplitJoiner.exe")) {
+        $entry = "HKCU:\Software\Classes\$ext\OpenWithList\$n"
+        if (Test-Path -LiteralPath $entry) {
+            Remove-Item -Recurse -Force -LiteralPath $entry -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # 3. Remove Start Menu shortcuts (both Splitter and Joiner entries).
 foreach ($lnk in @($ShortcutFn, (Join-Path $StartMenu "AutoSplit Joiner.lnk"))) {
     if (Test-Path -LiteralPath $lnk) {

@@ -62,17 +62,29 @@ def main() -> int:
 
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
+    # PyInstaller 6.14+ moved `_pyi_rth_utils` into PyInstaller/fake-modules/
+    # (a location its own default module search does NOT scan). The PySide6
+    # runtime hook imports it, so if we don't force-include it, the frozen
+    # exe crashes at startup: `ModuleNotFoundError: No module named '_pyi_rth_utils'`.
+    # We put its parent dir on --paths and mark it as a hidden import.
+    import PyInstaller
+    fake_modules = Path(PyInstaller.__file__).parent / "fake-modules"
+
     args = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--name", "AutoSplit",
         "--windowed",
         "--paths", str(SRC),
+        "--paths", str(fake_modules),
         "--workpath", str(WORK_BUILD),
         "--distpath", str(WORK_DIST),
-        # PyInstaller's built-in PySide6 hook collects Qt submodules and the
-        # runtime helpers (_pyi_rth_utils etc.). Only add hidden-imports for
-        # modules the static analysis misses.
+        # Runtime helper missing from PyInstaller 6.14+ default collection.
+        "--hidden-import", "_pyi_rth_utils",
+        "--hidden-import", "_pyi_rth_utils.qt",
+        "--hidden-import", "_pyi_rth_utils.tempfile",
+        "--hidden-import", "_pyi_rth_utils._win32",
+        # PySide6 submodules the static analysis misses (dynamic imports).
         "--hidden-import", "PySide6.QtNetwork",
         "--hidden-import", "PySide6.QtMultimedia",
         "--hidden-import", "PySide6.QtMultimediaWidgets",

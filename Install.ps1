@@ -173,20 +173,77 @@ Register-OpenWithApp -ExeName "AutoSplit.exe" -ExePath $InstalledExe `
 Register-OpenWithApp -ExeName $JoinerExeName -ExePath $JoinerExe `
     -FriendlyName "AutoSplit Joiner" -Extensions $AllExts
 
-# Also add each app to the per-extension OpenWithList — this is what makes
-# the apps show up in the initial 'Open with' picker (not just under
-# 'Look for another app on this PC'). Windows uses this list to build the
-# 'Suggested apps' section of the modern picker.
+# Add to HKCU\...\Classes\<ext>\OpenWithList (used by 'Choose another app').
 foreach ($ext in $AllExts) {
     $listRoot = "HKCU:\Software\Classes\$ext\OpenWithList"
     New-Item -Path $listRoot -Force | Out-Null
     foreach ($n in @("AutoSplit.exe", $JoinerExeName)) {
         $entry = "$listRoot\$n"
-        # OpenWithList entries are empty keys (no values needed).
         if (-not (Test-Path -LiteralPath $entry)) {
             New-Item -Path $entry -Force | Out-Null
         }
     }
+}
+
+# The TOP-LEVEL 'Open with' flyout in Windows 11 reads Explorer's per-user
+# FileExts store instead. Values here are single-letter names ('a','b','c'...)
+# each pointing at an exe basename; MRUList orders them. Prepend our two apps
+# so they appear at the very top of the picker.
+$Letters = "abcdefghijklmnopqrstuvwxyz".ToCharArray()
+
+function Ensure-FileExtsOpenWith {
+    param([string]$Ext, [string[]]$ExeNames)
+
+    $picker = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$Ext\OpenWithList"
+    New-Item -Path $picker -Force | Out-Null
+
+    # Existing MRU (a string of letters, e.g. "abc").
+    $currentMru = ""
+    try {
+        $prop = Get-ItemProperty -Path $picker -Name "MRUList" -ErrorAction Stop
+        $currentMru = $prop.MRUList
+    } catch { $currentMru = "" }
+
+    # Find any letters already mapped to our apps so we don't duplicate them.
+    $existingByExe = @{}
+    foreach ($ch in $currentMru.ToCharArray()) {
+        try {
+            $val = (Get-ItemProperty -Path $picker -Name $ch -ErrorAction Stop)."$ch"
+            if ($val) { $existingByExe[$val] = $ch }
+        } catch {}
+    }
+
+    # Letters already taken by SOMETHING (regardless of exe).
+    $used = @{}
+    foreach ($ch in $currentMru.ToCharArray()) { $used[$ch] = $true }
+
+    $ourLetters = @()
+    foreach ($exe in $ExeNames) {
+        if ($existingByExe.ContainsKey($exe)) {
+            $ourLetters += $existingByExe[$exe]
+            continue
+        }
+        # Pick the first unused letter.
+        $chosen = $null
+        foreach ($ch in $Letters) {
+            if (-not $used.ContainsKey($ch)) { $chosen = $ch; break }
+        }
+        if ($chosen) {
+            Set-ItemProperty -Path $picker -Name "$chosen" -Value $exe -Type String
+            $used[$chosen] = $true
+            $ourLetters += $chosen
+        }
+    }
+
+    # Rebuild MRUList: OUR letters first (so we appear at the top), then any
+    # letters already present that weren't ours.
+    $othersMru = ($currentMru.ToCharArray() | Where-Object { $_ -notin $ourLetters }) -join ""
+    $newMru = (($ourLetters -join "") + $othersMru)
+    Set-ItemProperty -Path $picker -Name "MRUList" -Value $newMru -Type String
+}
+
+foreach ($ext in $AllExts) {
+    Ensure-FileExtsOpenWith -Ext $ext -ExeNames @("AutoSplit.exe", $JoinerExeName)
 }
 
 # Notify the shell that file-association data has changed so Explorer picks

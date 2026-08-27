@@ -42,14 +42,39 @@ foreach ($appExe in @("AutoSplit.exe", "AutoSplitJoiner.exe")) {
     }
 }
 
-# 2c. Remove per-extension OpenWithList entries.
+# 2c. Remove per-extension OpenWithList entries (both locations).
 $VIDEO_EXTS_LIST = @(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
 $AUDIO_EXTS_LIST = @(".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus")
 foreach ($ext in ($VIDEO_EXTS_LIST + $AUDIO_EXTS_LIST)) {
+    # HKCU\Software\Classes location.
     foreach ($n in @("AutoSplit.exe", "AutoSplitJoiner.exe")) {
         $entry = "HKCU:\Software\Classes\$ext\OpenWithList\$n"
         if (Test-Path -LiteralPath $entry) {
             Remove-Item -Recurse -Force -LiteralPath $entry -ErrorAction SilentlyContinue
+        }
+    }
+    # HKCU\Explorer\FileExts location (letter-keyed MRU entries).
+    $picker = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\OpenWithList"
+    if (Test-Path -LiteralPath $picker) {
+        $props = (Get-Item -LiteralPath $picker).Property
+        $mru = ""
+        try { $mru = (Get-ItemProperty -LiteralPath $picker -Name MRUList -ErrorAction Stop).MRUList } catch {}
+        $removedLetters = @()
+        foreach ($p in $props) {
+            if ($p -eq "MRUList") { continue }
+            $val = (Get-ItemProperty -LiteralPath $picker -Name $p -ErrorAction SilentlyContinue)."$p"
+            if ($val -in @("AutoSplit.exe", "AutoSplitJoiner.exe")) {
+                Remove-ItemProperty -LiteralPath $picker -Name $p -ErrorAction SilentlyContinue
+                $removedLetters += $p
+            }
+        }
+        if ($mru -and $removedLetters.Count) {
+            $newMru = ($mru.ToCharArray() | Where-Object { $_ -notin $removedLetters }) -join ""
+            if ($newMru) {
+                Set-ItemProperty -LiteralPath $picker -Name MRUList -Value $newMru -Type String
+            } else {
+                Remove-ItemProperty -LiteralPath $picker -Name MRUList -ErrorAction SilentlyContinue
+            }
         }
     }
 }

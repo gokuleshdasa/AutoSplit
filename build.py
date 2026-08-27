@@ -79,12 +79,17 @@ def main() -> int:
         "--paths", str(fake_modules),
         "--workpath", str(WORK_BUILD),
         "--distpath", str(WORK_DIST),
-        # Runtime helper missing from PyInstaller 6.14+ default collection.
+        # Pull in Qt plugins (qwindows.dll platform, imageformats, mediaservice, etc.)
+        # via the data + binaries side of PyInstaller's PySide6 hook.
+        "--collect-all", "PySide6",
+        # `--collect-all` can suppress inclusion of PyInstaller's own
+        # _pyi_rth_utils helper (moved into fake-modules/ in 6.14+),
+        # so force-include it explicitly.
         "--hidden-import", "_pyi_rth_utils",
         "--hidden-import", "_pyi_rth_utils.qt",
         "--hidden-import", "_pyi_rth_utils.tempfile",
         "--hidden-import", "_pyi_rth_utils._win32",
-        # PySide6 submodules the static analysis misses (dynamic imports).
+        # Dynamic-imported PySide6 modules the static analysis misses.
         "--hidden-import", "PySide6.QtNetwork",
         "--hidden-import", "PySide6.QtMultimedia",
         "--hidden-import", "PySide6.QtMultimediaWidgets",

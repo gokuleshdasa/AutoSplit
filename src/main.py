@@ -57,8 +57,27 @@ def _set_icon(app: QApplication) -> None:
 
 
 def _run_splitter(app: QApplication, initial: str | None) -> int:
+    """Splitter. Uses the same single-instance IPC as the joiner so that
+    'Open with AutoSplit' on multiple files loads them all as a queue.
+
+    - First invocation opens the window, becomes the QLocalServer.
+    - Subsequent invocations (same click) forward their path and exit silently.
+    - After a 500 ms debounce, MainWindow receives the full list as a queue.
+    - Single-file usage is unchanged: one path in = queue of size 1 = queue panel stays hidden.
+    """
     from main_window import MainWindow
-    win = MainWindow(initial_file=initial)
+    from join_ipc import try_forward_to_running, JoinCollector
+
+    collector = None
+    if initial:
+        if try_forward_to_running(initial, "split"):
+            _log(f"split: forwarded '{initial}' to running instance; exiting.")
+            return 0
+        collector = JoinCollector("split")
+        collector.add_path(initial)
+
+    win = MainWindow(initial_file=initial if collector is None else None,
+                     collector=collector)
     win.show()
     return app.exec()
 

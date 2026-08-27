@@ -103,7 +103,7 @@ def fmt_time(seconds: float) -> str:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, initial_file: Optional[str] = None):
+    def __init__(self, initial_file: Optional[str] = None, collector=None):
         super().__init__()
         self.setWindowTitle("AutoSplit — Media Splitter")
         self.resize(1200, 780)
@@ -120,6 +120,11 @@ class MainWindow(QMainWindow):
         self._regions: list[Region] = []
         self._snap_fine = False   # False = arrow step 1s, True = arrow step 1 frame
         self._shortcuts: list[QShortcut] = []
+        # Queue state (populated by an IPC collector when 'Open with' multi-file).
+        self._collector = collector
+        self._queue: list[str] = []
+        self._queue_index: int = -1
+        self._queue_completed: set[int] = set()
 
         self._build_ui()
         self._wire_shortcuts()
@@ -132,6 +137,11 @@ class MainWindow(QMainWindow):
 
         if initial_file:
             QTimer.singleShot(0, lambda: self._load_file(initial_file))
+
+        if collector is not None:
+            collector.ready.connect(self._on_queue_ready)
+            collector.added.connect(self._on_queue_file_added)
+            self.file_label.setText("Collecting selected files...")
 
     # --- UI construction ---------------------------------------------------
     def _build_ui(self) -> None:
@@ -232,6 +242,9 @@ class MainWindow(QMainWindow):
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(10)
 
+        self.queue_group = self._build_queue_group()
+        self.queue_group.setVisible(False)
+        right_lay.addWidget(self.queue_group)
         right_lay.addWidget(self._build_mode_group())
         right_lay.addWidget(self._build_split_group())
         right_lay.addWidget(self._build_markers_group())
@@ -324,6 +337,45 @@ class MainWindow(QMainWindow):
         self.segments_label = QLabel("—", objectName="Muted")
         self.segments_label.setWordWrap(True)
         g.addWidget(self.segments_label, 3, 0, 1, 2)
+        return gb
+
+    def _build_queue_group(self) -> QGroupBox:
+        gb = QGroupBox("Queue")
+        v = QVBoxLayout(gb)
+
+        self.queue_status_label = QLabel("—")
+        v.addWidget(self.queue_status_label)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.queue_prev_btn = QPushButton("◀ Prev")
+        self.queue_prev_btn.clicked.connect(lambda: self._queue_step(-1))
+        row.addWidget(self.queue_prev_btn)
+        self.queue_next_btn = QPushButton("Next ▶")
+        self.queue_next_btn.clicked.connect(lambda: self._queue_step(+1))
+        row.addWidget(self.queue_next_btn)
+        self.queue_skip_btn = QPushButton("Skip")
+        self.queue_skip_btn.setToolTip("Mark current file as skipped and move to the next.")
+        self.queue_skip_btn.clicked.connect(self._on_queue_skip)
+        row.addWidget(self.queue_skip_btn)
+        self.queue_clear_btn = QPushButton("Clear")
+        self.queue_clear_btn.setToolTip("Clear the queue; keep the current file loaded.")
+        self.queue_clear_btn.clicked.connect(self._on_queue_clear)
+        row.addWidget(self.queue_clear_btn)
+        v.addLayout(row)
+
+        self.queue_list = QListWidget()
+        self.queue_list.setMaximumHeight(180)
+        self.queue_list.itemDoubleClicked.connect(self._on_queue_item_dbl)
+        v.addWidget(self.queue_list)
+
+        self.queue_auto_cb = QCheckBox("Auto-advance to next file after successful export")
+        self.queue_auto_cb.setChecked(True)
+        v.addWidget(self.queue_auto_cb)
+
+        v.addWidget(QLabel(
+            "Split length, format, quality, folder and naming carry over between files. "
+            "Markers and IN/OUT reset per file.", objectName="Muted"))
         return gb
 
     def _build_mode_group(self) -> QGroupBox:
@@ -725,6 +777,100 @@ class MainWindow(QMainWindow):
             app_settings.save(self._settings)
             self._wire_shortcuts()
             self.statusBar().showMessage("Preferences updated.", 2500)
+
+    # --- queue -------------------------------------------------------------
+    def _on_queue_file_added(self, path: str) -> None:
+        # Live indicator while the collector is still receiving invocations.
+        if not self._queue:
+            self.file_label.setText(f"Collecting selected files… ({1} so far)")
+        else:
+            self.file_label.setText(
+                f"Collecting selected files… ({len(self._queue) + 1} so far)")
+
+    def _on_queue_ready(self, paths: list) -> None:
+        if not paths:
+            return
+        import re
+        def natural_key(p):
+            base = os.path.basename(p).lower()
+            return [int(t) if t.isdigit() else t
+                    for t in re.split(r"(\d+)", base)]
+        self._queue = sorted(paths, key=natural_key)
+        self._queue_index = 0
+        self._queue_completed.clear()
+        self.queue_group.setVisible(len(self._queue) > 1)
+        self._refresh_queue_ui()
+        self._load_file(self._queue[0])
+        # Collector's job is done.
+        if self._collector is not None:
+            self._collector.stop()
+            self._collector = None
+
+    def _queue_step(self, delta: int) -> None:
+        if not self._queue:
+            return
+        new_idx = self._queue_index + delta
+        if not (0 <= new_idx < len(self._queue)):
+            return
+        self._queue_index = new_idx
+        self._load_file(self._queue[self._queue_index])
+        self._refresh_queue_ui()
+
+    def _on_queue_skip(self) -> None:
+        if not self._queue:
+            return
+        self._queue_completed.add(self._queue_index)   # mark as done/skipped
+        if self._queue_index < len(self._queue) - 1:
+            self._queue_step(+1)
+        else:
+            self._refresh_queue_ui()
+
+    def _on_queue_clear(self) -> None:
+        if not self._queue:
+            return
+        # Keep the currently-loaded file loaded; empty the queue list itself.
+        self._queue = []
+        self._queue_index = -1
+        self._queue_completed.clear()
+        self.queue_group.setVisible(False)
+        self._refresh_queue_ui()
+
+    def _on_queue_item_dbl(self, item) -> None:
+        row = self.queue_list.row(item)
+        if 0 <= row < len(self._queue):
+            self._queue_index = row
+            self._load_file(self._queue[row])
+            self._refresh_queue_ui()
+
+    def _refresh_queue_ui(self) -> None:
+        n = len(self._queue)
+        if n == 0:
+            self.queue_status_label.setText("—")
+            self.queue_list.clear()
+            self.queue_group.setVisible(False)
+            return
+        cur = self._queue_index + 1
+        remaining = max(0, n - len(self._queue_completed))
+        self.queue_status_label.setText(
+            f"<b>{cur} / {n}</b>   ·   {remaining} remaining"
+        )
+        self.queue_list.blockSignals(True)
+        self.queue_list.clear()
+        for i, p in enumerate(self._queue):
+            name = os.path.basename(p)
+            if i == self._queue_index:
+                prefix = "▶ "
+            elif i in self._queue_completed:
+                prefix = "✓ "
+            else:
+                prefix = "  "
+            item = QListWidgetItem(f"{prefix}{i + 1:>2}.  {name}")
+            self.queue_list.addItem(item)
+        self.queue_list.setCurrentRow(self._queue_index)
+        self.queue_list.blockSignals(False)
+        self.queue_prev_btn.setEnabled(self._queue_index > 0)
+        self.queue_next_btn.setEnabled(self._queue_index < n - 1)
+        self.queue_skip_btn.setEnabled(self._queue_index < n - 1)
 
     # --- mode & markers ----------------------------------------------------
     def _is_markers_mode(self) -> bool:
@@ -1189,6 +1335,23 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Export complete ✓")
             if self.open_folder_cb.isChecked():
                 self._open_folder(self.folder_edit.text().strip())
+
+            # Queue advance takes precedence over 'close after export': we only
+            # close when the whole queue is finished.
+            if self._queue and self._queue_index >= 0:
+                self._queue_completed.add(self._queue_index)
+                self._refresh_queue_ui()
+                more_to_go = self._queue_index < len(self._queue) - 1
+                if more_to_go and self.queue_auto_cb.isChecked():
+                    self.status_label.setText(
+                        f"Export complete ✓  ·  advancing to {self._queue_index + 2}/{len(self._queue)}...")
+                    QTimer.singleShot(600, lambda: self._queue_step(+1))
+                    return
+                if more_to_go:
+                    self.status_label.setText(
+                        f"Export complete ✓  ·  {len(self._queue) - self._queue_index - 1} file(s) still queued")
+                    return
+
             if self.close_after_cb.isChecked():
                 QTimer.singleShot(500, self.close)
         else:
@@ -1209,6 +1372,11 @@ class MainWindow(QMainWindow):
         if self._export_worker:
             self._export_worker.cancel()
         self._cancel_waveform()
+        if self._collector is not None:
+            try:
+                self._collector.stop()
+            except Exception:
+                pass
         try:
             self._save_current_settings(self.folder_edit.text().strip())
         except Exception:

@@ -133,6 +133,9 @@ class MainWindow(QMainWindow):
         self._queue: list[str] = []
         self._queue_index: int = -1
         self._queue_completed: set[int] = set()
+        # Filmstrip worker refs (kept alive to prevent Python GC dropping them).
+        self._filmstrip_thread = None
+        self._filmstrip_worker = None
 
         self._build_ui()
         self._wire_shortcuts()
@@ -237,21 +240,22 @@ class MainWindow(QMainWindow):
         # Zoom + filmstrip toolbar below the timeline.
         tl_tools = QHBoxLayout()
         tl_tools.setSpacing(4)
-        z_out = QPushButton("−")
-        z_out.setFixedWidth(30)
-        z_out.setToolTip("Zoom out")
+        z_out = QPushButton("Zoom -")
+        z_out.setFixedWidth(78)
+        z_out.setToolTip("Zoom out (also mouse wheel over the timeline)")
         z_out.clicked.connect(lambda: self._timeline_zoom(0.7))
         tl_tools.addWidget(z_out)
-        z_in = QPushButton("+")
-        z_in.setFixedWidth(30)
-        z_in.setToolTip("Zoom in (also Ctrl+wheel over the timeline)")
+        z_in = QPushButton("Zoom +")
+        z_in.setFixedWidth(78)
+        z_in.setToolTip("Zoom in (also mouse wheel over the timeline)")
         z_in.clicked.connect(lambda: self._timeline_zoom(1.4))
         tl_tools.addWidget(z_in)
         z_fit = QPushButton("Fit")
+        z_fit.setFixedWidth(48)
         z_fit.setToolTip("Zoom out to fit the whole media")
         z_fit.clicked.connect(self._on_timeline_zoom_fit)
         tl_tools.addWidget(z_fit)
-        self.filmstrip_btn = QPushButton("👁 Filmstrip")
+        self.filmstrip_btn = QPushButton("Filmstrip")
         self.filmstrip_btn.setCheckable(True)
         self.filmstrip_btn.setToolTip("Show / hide video thumbnails across the timeline")
         self.filmstrip_btn.toggled.connect(self._on_toggle_filmstrip)
@@ -261,7 +265,8 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "Left-drag = seek  ·  <b>Alt-drag = highlight to add region</b>  ·  Shift-drag = IN  ·  Ctrl-drag = OUT  ·  "
-            "Right-click = menu  ·  I/O = mark  ·  M = add  ·  S = toggle 1 s ↔ 1 frame  ·  "
+            "Right-click = menu  ·  <b>Wheel = zoom / Shift+wheel = pan</b>  ·  "
+            "I/O = mark  ·  M = add  ·  S = toggle 1 s ↔ 1 frame  ·  "
             "← → nudge  ·  Ctrl+arrow / Shift+arrow = jump  ·  Space = play/pause  ·  Ctrl+, = Preferences",
             objectName="Muted")
         hint.setWordWrap(True)
@@ -1400,21 +1405,35 @@ class MainWindow(QMainWindow):
                         images.append(img)
                 self.done.emit(images)
 
-        thread = _QThread()
-        worker = _FSWorker(cmd, pattern)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
+        # Kill any prior filmstrip run so we don't race.
+        if self._filmstrip_thread is not None:
+            try:
+                self._filmstrip_thread.quit()
+                self._filmstrip_thread.wait(300)
+            except Exception:
+                pass
+        self._filmstrip_thread = _QThread()
+        self._filmstrip_worker = _FSWorker(cmd, pattern)
+        self._filmstrip_worker.moveToThread(self._filmstrip_thread)
+        self._filmstrip_thread.started.connect(self._filmstrip_worker.run)
 
         def _on_done(images):
-            # Convert to QPixmap on the main GUI thread.
-            pixmaps = [QPixmap.fromImage(img) for img in images]
-            self.timeline.set_filmstrip_frames(pixmaps)
-            thread.quit()
+            # Convert to QPixmap on the main GUI thread (QPixmap is not
+            # thread-safe; QImage returned from the worker is).
+            try:
+                pixmaps = [QPixmap.fromImage(img) for img in images]
+                self.timeline.set_filmstrip_frames(pixmaps)
+            finally:
+                if self._filmstrip_thread is not None:
+                    self._filmstrip_thread.quit()
 
-        worker.done.connect(_on_done)
-        worker.done.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
+        def _on_finished():
+            self._filmstrip_thread = None
+            self._filmstrip_worker = None
+
+        self._filmstrip_worker.done.connect(_on_done)
+        self._filmstrip_thread.finished.connect(_on_finished)
+        self._filmstrip_thread.start()
 
     # --- Frame / GIF exports (split-button menu) ---------------------------
     def _current_range(self) -> tuple[float, float]:

@@ -41,6 +41,43 @@ def _log(msg: str) -> None:
         pass
 
 
+def _install_crash_handlers() -> None:
+    """Route Python exceptions and native C crashes into the log so we can
+    diagnose failures in the frozen exe (which otherwise dies silently)."""
+    import faulthandler
+    import traceback
+
+    # Native crash dump (segfaults, C++ asserts, Qt violations).
+    try:
+        faulthandler.enable(open(_LOG_PATH, "a", buffering=1))
+    except Exception:
+        pass
+
+    # Uncaught Python exceptions.
+    def _excepthook(etype, value, tb):
+        try:
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"\n{datetime.datetime.now().isoformat(timespec='milliseconds')}  "
+                        f"pid={os.getpid()}  UNCAUGHT EXCEPTION\n")
+                traceback.print_exception(etype, value, tb, file=f)
+                f.write("\n")
+        except Exception:
+            pass
+        sys.__excepthook__(etype, value, tb)
+
+    sys.excepthook = _excepthook
+
+    # Qt slots swallow exceptions in PySide6 6.x — hook them explicitly.
+    try:
+        from PySide6.QtCore import qInstallMessageHandler, QtMsgType
+        def qt_msg(mode, ctx, msg):
+            if mode >= QtMsgType.QtCriticalMsg:
+                _log(f"Qt {mode.name}: {msg}")
+        qInstallMessageHandler(qt_msg)
+    except Exception:
+        pass
+
+
 def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--join-custom", action="store_true")
@@ -111,6 +148,7 @@ def _run_join(app: QApplication, path: str | None, mode: str) -> int:
 def main() -> int:
     args = _parse_args()
     _log(f"startup argv={sys.argv}")
+    _install_crash_handlers()
 
     app = QApplication(sys.argv)
     app.setApplicationName("AutoSplit")

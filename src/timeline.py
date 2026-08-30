@@ -302,21 +302,22 @@ class Timeline(QWidget):
             self.update()
 
     def wheelEvent(self, ev: QWheelEvent) -> None:
-        # Ctrl + wheel = zoom around cursor. Wheel alone = horizontal pan.
+        # Default: wheel = zoom around cursor.
+        # Shift + wheel = horizontal pan.
+        # (Ctrl + wheel also zooms, kept for compatibility with the older map.)
         if self._duration <= 0:
             return
         anchor_secs = self._seconds_for(ev.position().x())
-        if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            steps = ev.angleDelta().y() / 120.0
-            factor = 1.25 ** steps
-            self.set_zoom(self._zoom * factor, center_seconds=anchor_secs)
-            ev.accept()
-        else:
-            # Pan proportional to visible span so panning feels the same at all zooms.
+        pan_mode = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if pan_mode:
             span = self.visible_span()
             delta = -ev.angleDelta().y() / 120.0 * (span * 0.10)
             self.pan(delta)
-            ev.accept()
+        else:
+            steps = ev.angleDelta().y() / 120.0
+            factor = 1.25 ** steps
+            self.set_zoom(self._zoom * factor, center_seconds=anchor_secs)
+        ev.accept()
 
     def mouseReleaseEvent(self, _ev: QMouseEvent) -> None:
         was_selecting = (self._drag_mode == "select"

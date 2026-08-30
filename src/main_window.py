@@ -45,11 +45,12 @@ QPushButton:pressed { background: #262626; }
 QPushButton#Primary { background: #0078d4; border: 1px solid #0078d4; color: white; font-weight: 600; padding: 8px 20px; }
 QPushButton#Primary:hover { background: #106ebe; }
 QPushButton#Primary:disabled { background: #444; color: #888; border-color: #444; }
-QToolButton#Primary { background: #0078d4; border: 1px solid #0078d4; color: white; font-weight: 600; padding: 8px 20px; border-radius: 4px; }
+QToolButton#Primary { background: #0078d4; border: 1px solid #0078d4; color: white; font-weight: 600; padding: 8px 20px; padding-right: 26px; border-radius: 4px; }
 QToolButton#Primary:hover { background: #106ebe; }
 QToolButton#Primary:disabled { background: #444; color: #888; border-color: #444; }
-QToolButton#Primary::menu-button { border: none; border-left: 1px solid rgba(255,255,255,0.35); width: 20px; }
-QToolButton#Primary::menu-arrow { image: none; }
+QToolButton#Primary::menu-button { background: #0078d4; border: none; border-left: 1px solid rgba(255,255,255,0.45); width: 22px; border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
+QToolButton#Primary::menu-button:hover { background: #106ebe; }
+QToolButton#Primary::menu-arrow { subcontrol-position: center; }
 QPushButton#Danger { background: #a4262c; border-color: #a4262c; color: white; }
 QPushButton#Danger:hover { background: #b53037; }
 QCheckBox { spacing: 8px; }
@@ -1349,18 +1350,20 @@ class MainWindow(QMainWindow):
             self._load_filmstrip()
 
     def _load_filmstrip(self, n_frames: int = 24) -> None:
-        """Grab N evenly-spaced thumbnails and hand them to the Timeline."""
+        """Grab N evenly-spaced thumbnails and hand them to the Timeline.
+
+        QPixmap can only be constructed on the GUI thread, so the worker
+        returns QImages (thread-safe) and we convert to QPixmap here."""
         if not (self._media_info and self._current_file):
             return
         import subprocess, tempfile
         dur = self._media_info.duration_seconds
         if dur <= 0:
             return
-        # We reuse ffmpeg's fps filter to grab N frames across the duration.
         target_fps = max(n_frames / dur, 0.02)
-        pattern = os.path.join(tempfile.gettempdir(), f"autosplit_filmstrip_%03d.jpg")
-        # Clear old pattern files.
-        for i in range(200):
+        pattern = os.path.join(tempfile.gettempdir(), "autosplit_filmstrip_%03d.jpg")
+        # Clean up any stale frames from a prior run.
+        for i in range(1, 401):
             try:
                 os.remove(pattern.replace("%03d", f"{i:03d}"))
             except OSError:
@@ -1373,10 +1376,10 @@ class MainWindow(QMainWindow):
             pattern,
         ]
         from PySide6.QtCore import QThread as _QThread, QObject, Signal as _Signal
-        from PySide6.QtGui import QPixmap
+        from PySide6.QtGui import QImage, QPixmap
 
         class _FSWorker(QObject):
-            done = _Signal(list)
+            done = _Signal(list)   # list of QImage
             def __init__(self, cmd, pattern):
                 super().__init__()
                 self._cmd = cmd
@@ -1387,23 +1390,27 @@ class MainWindow(QMainWindow):
                                    **fu._no_window_kwargs())
                 except Exception:
                     self.done.emit([]); return
-                pixmaps = []
+                images = []
                 for i in range(1, 401):
                     p = self._pat.replace("%03d", f"{i:03d}")
                     if not os.path.exists(p):
                         break
-                    pm = QPixmap(p)
-                    if not pm.isNull():
-                        pixmaps.append(pm)
-                self.done.emit(pixmaps)
+                    img = QImage(p)
+                    if not img.isNull():
+                        images.append(img)
+                self.done.emit(images)
 
         thread = _QThread()
         worker = _FSWorker(cmd, pattern)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        def _on_done(pixmaps):
+
+        def _on_done(images):
+            # Convert to QPixmap on the main GUI thread.
+            pixmaps = [QPixmap.fromImage(img) for img in images]
             self.timeline.set_filmstrip_frames(pixmaps)
             thread.quit()
+
         worker.done.connect(_on_done)
         worker.done.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)

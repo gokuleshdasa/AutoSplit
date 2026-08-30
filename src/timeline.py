@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import QPainter, QColor, QPen, QMouseEvent, QPaintEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget, QSizePolicy
 
-from regions import Region
+from regions import Region, region_rgb
 
 
 def _fmt(secs: float) -> str:
@@ -380,14 +380,10 @@ class Timeline(QWidget):
                 p.drawPixmap(QRectF(x, band_top, w, band_h), pm,
                              QRectF(pm.rect()))
 
-        # Named region overlays (skipped in simple mode).
-        colors = [
-            QColor(255, 140, 0, 90),   # orange
-            QColor(0, 200, 140, 90),   # teal
-            QColor(200, 100, 200, 90), # violet
-            QColor(255, 209, 90, 90),  # amber
-            QColor(120, 200, 255, 90), # sky
-        ]
+        # Named region overlays (skipped in simple mode). Use the shared
+        # palette so the Markers list icons match these overlay colors.
+        colors = [QColor(r, g, b, 90) for (r, g, b) in
+                  [region_rgb(i) for i in range(5)]]
         if self._simple_mode:
             # Playhead only.
             px = self._x_for(self._position)

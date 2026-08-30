@@ -8,6 +8,21 @@ from dataclasses import dataclass
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+# Shared color palette (used by both the Timeline overlay and the Markers
+# list icon). RGB only — the timeline applies its own alpha for the overlay.
+REGION_PALETTE_RGB = [
+    (255, 140,   0),   # orange
+    (  0, 200, 140),   # teal
+    (200, 100, 200),   # violet
+    (255, 209,  90),   # amber
+    (120, 200, 255),   # sky
+]
+
+
+def region_rgb(index: int) -> tuple[int, int, int]:
+    return REGION_PALETTE_RGB[index % len(REGION_PALETTE_RGB)]
+
+
 @dataclass
 class Region:
     start: float

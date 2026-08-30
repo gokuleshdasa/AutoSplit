@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal, QPoint
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QIcon, QCloseEvent
+from PySide6.QtGui import (
+    QAction, QCloseEvent, QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -25,7 +27,7 @@ import frame_extract as fx
 from export_worker import ExportJob, start_export
 from frame_dialog import AllFramesDialog, GifExportDialog, SingleFrameDialog
 from preferences_dialog import PreferencesDialog
-from regions import Region, sanitize_name
+from regions import Region, region_rgb, sanitize_name
 from timeline import Timeline
 from waveform import start_waveform
 
@@ -340,6 +342,11 @@ class MainWindow(QMainWindow):
         act_frame_all = menu.addAction("Extract all frames…")
         act_frame_all.triggered.connect(self._on_extract_all_frames)
         menu.addSeparator()
+        act_marker_first = menu.addAction("Export selected marker → first frame…")
+        act_marker_first.triggered.connect(self._on_extract_marker_first_frame)
+        act_marker_last = menu.addAction("Export selected marker → last frame…")
+        act_marker_last.triggered.connect(self._on_extract_marker_last_frame)
+        menu.addSeparator()
         act_gif = menu.addAction("Export as GIF…")
         act_gif.triggered.connect(self._on_export_gif)
         self.export_btn.setMenu(menu)
@@ -472,15 +479,30 @@ class MainWindow(QMainWindow):
 
         v.addLayout(row)
 
+        # Second row: jump / frame actions on the selected marker.
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        self.jump_first_btn = QPushButton("|◀ First frame")
+        self.jump_first_btn.setToolTip("Jump the playhead to the selected marker's IN")
+        self.jump_first_btn.clicked.connect(lambda: self._on_marker_jump("first"))
+        row2.addWidget(self.jump_first_btn)
+        self.jump_last_btn = QPushButton("Last frame ▶|")
+        self.jump_last_btn.setToolTip("Jump the playhead to the selected marker's OUT")
+        self.jump_last_btn.clicked.connect(lambda: self._on_marker_jump("last"))
+        row2.addWidget(self.jump_last_btn)
+        v.addLayout(row2)
+
         self.markers_list = QListWidget()
         self.markers_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.markers_list.itemDoubleClicked.connect(self._on_rename_marker)
         self.markers_list.currentRowChanged.connect(self._on_marker_selected)
+        self.markers_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.markers_list.customContextMenuRequested.connect(self._on_marker_context_menu)
         v.addWidget(self.markers_list)
 
         tip = QLabel(
             "Tip: press I / O at the playhead to set IN and OUT, then M to add the region. "
-            "Or right-click the timeline for a menu.",
+            "Right-click a marker for a menu (rename, delete, jump, export first / last frame).",
             objectName="Muted")
         tip.setWordWrap(True)
         v.addWidget(tip)
@@ -1031,6 +1053,117 @@ class MainWindow(QMainWindow):
         # Seek to the start of the marker so the user sees where it is.
         self.player.setPosition(int(reg.start * 1000))
 
+    def _selected_marker_index(self) -> int:
+        row = self.markers_list.currentRow()
+        return row if 0 <= row < len(self._regions) else -1
+
+    def _on_marker_jump(self, which: str) -> None:
+        idx = self._selected_marker_index()
+        if idx < 0:
+            return
+        reg = self._regions[idx]
+        if which == "first":
+            self.player.setPosition(int(max(0.0, reg.start) * 1000))
+        else:
+            # Seek to just before the last frame so the frame is visible.
+            frame_period = self._media_info.frame_period() if self._media_info else 0.04
+            target = max(reg.start, reg.end - frame_period)
+            self.player.setPosition(int(target * 1000))
+
+    def _on_marker_context_menu(self, pos) -> None:
+        item = self.markers_list.itemAt(pos)
+        if item is None:
+            return
+        row = self.markers_list.row(item)
+        if not (0 <= row < len(self._regions)):
+            return
+        self.markers_list.setCurrentRow(row)
+        reg = self._regions[row]
+
+        menu = QMenu(self)
+        act_jump_in  = menu.addAction(f"Jump to first frame  ({fmt_time(reg.start)})")
+        act_jump_out = menu.addAction(f"Jump to last frame  ({fmt_time(reg.end)})")
+        menu.addSeparator()
+        act_load_range = menu.addAction("Load as current IN / OUT")
+        menu.addSeparator()
+        act_frame_first = menu.addAction("Export first frame…")
+        act_frame_last  = menu.addAction("Export last frame…")
+        menu.addSeparator()
+        act_rename = menu.addAction("Rename…")
+        act_delete = menu.addAction("Delete")
+
+        chosen = menu.exec(self.markers_list.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_jump_in:
+            self._on_marker_jump("first")
+        elif chosen is act_jump_out:
+            self._on_marker_jump("last")
+        elif chosen is act_load_range:
+            self.timeline.set_start(reg.start)
+            self.timeline.set_end(reg.end)
+            self.start_input.setText(fmt_time(reg.start))
+            self.end_input.setText(fmt_time(reg.end))
+        elif chosen is act_frame_first:
+            self._extract_frame_at(reg.start, suffix=f"{reg.name or 'clip'}_first")
+        elif chosen is act_frame_last:
+            frame_period = self._media_info.frame_period() if self._media_info else 0.04
+            t = max(reg.start, reg.end - frame_period)
+            self._extract_frame_at(t, suffix=f"{reg.name or 'clip'}_last")
+        elif chosen is act_rename:
+            self._on_rename_marker()
+        elif chosen is act_delete:
+            self._on_delete_marker()
+
+    def _extract_frame_at(self, timestamp: float, suffix: str = "") -> None:
+        """Grab one frame at `timestamp` using the current defaults, then optionally
+        show the options dialog based on the prompt-before-frame-export setting."""
+        if not self._media_info or not self._current_file:
+            return
+
+        prompt = self._settings.prompt_before_frame_export
+        if prompt:
+            dlg = SingleFrameDialog(self._settings, self._current_file, timestamp, self)
+            # Pre-fill the path with the suffix so region-based grabs get a
+            # meaningful filename.
+            if suffix:
+                base = os.path.splitext(os.path.basename(self._current_file))[0]
+                folder = self._settings.frame_output_dir or os.path.dirname(self._current_file)
+                fmt = self._settings.frame_format
+                dlg.path_edit.setText(os.path.join(folder, f"{base}_{suffix}.{fmt}"))
+            if dlg.exec() != SingleFrameDialog.DialogCode.Accepted:
+                return
+            sel = dlg.selection()
+        else:
+            fmt = self._settings.frame_format
+            folder = self._settings.frame_output_dir or os.path.dirname(self._current_file)
+            base = os.path.splitext(os.path.basename(self._current_file))[0]
+            tail = f"_{suffix}" if suffix else f"_frame_{int(timestamp):04d}s"
+            sel = {
+                "format": fmt,
+                "quality": self._settings.frame_jpg_quality,
+                "output_path": os.path.join(folder, f"{base}{tail}.{fmt}"),
+            }
+
+        out = sel["output_path"]
+        if not out:
+            QMessageBox.warning(self, "Missing filename", "Choose a save path.")
+            return
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+        cmd = fx.build_single_frame_cmd(
+            input_path=self._current_file,
+            timestamp_seconds=timestamp,
+            output_path=out,
+            quality=int(sel["quality"]),
+        )
+        self._settings.frame_format = sel["format"]
+        self._settings.frame_jpg_quality = int(sel["quality"])
+        self._settings.frame_output_dir = os.path.dirname(out)
+        app_settings.save(self._settings)
+        self._run_ffmpeg_async(cmd, total_duration=0.001,
+                               output_path=out, label="Extract frame")
+
     def _on_timeline_context(self, global_pos: QPoint, at_seconds: float, region_idx: int) -> None:
         """Right-click on the timeline. Show a menu whose actions depend on
         whether the click landed inside an existing region."""
@@ -1071,14 +1204,32 @@ class MainWindow(QMainWindow):
             self.markers_list.setCurrentRow(region_idx)
             self._on_delete_marker()
 
+    def _region_swatch(self, index: int, size: int = 14) -> QIcon:
+        """Rounded filled swatch matching the timeline overlay color."""
+        r, g, b = region_rgb(index)
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(r, g, b))
+        p.drawRoundedRect(1, 1, size - 2, size - 2, 3, 3)
+        p.end()
+        return QIcon(pm)
+
     def _refresh_markers_ui(self) -> None:
         self.markers_list.blockSignals(True)
         self.markers_list.clear()
         for i, reg in enumerate(self._regions):
             label = f"{i + 1:>2}.  {reg.name}   ·   {fmt_time(reg.start)} → {fmt_time(reg.end)}   ({fmt_time(reg.duration)})"
-            self.markers_list.addItem(QListWidgetItem(label))
+            item = QListWidgetItem(self._region_swatch(i), label)
+            self.markers_list.addItem(item)
         self.markers_list.blockSignals(False)
         self.timeline.set_regions(self._regions)
+        # Enable/disable dependent buttons.
+        has_any = bool(self._regions)
+        self.jump_first_btn.setEnabled(has_any)
+        self.jump_last_btn.setEnabled(has_any)
         self._refresh_preview()
 
     # --- waveform ----------------------------------------------------------
@@ -1527,43 +1678,29 @@ class MainWindow(QMainWindow):
         if not self._media_info or not self._current_file:
             return
         ts = self.player.position() / 1000.0
+        self._extract_frame_at(ts)
 
-        prompt = self._settings.prompt_before_frame_export
-        if prompt:
-            dlg = SingleFrameDialog(self._settings, self._current_file, ts, self)
-            if dlg.exec() != SingleFrameDialog.DialogCode.Accepted:
-                return
-            sel = dlg.selection()
-        else:
-            fmt = self._settings.frame_format
-            folder = self._settings.frame_output_dir or os.path.dirname(self._current_file)
-            base = os.path.splitext(os.path.basename(self._current_file))[0]
-            sel = {
-                "format": fmt,
-                "quality": self._settings.frame_jpg_quality,
-                "output_path": os.path.join(folder, f"{base}_frame_{int(ts):04d}s.{fmt}"),
-            }
-
-        out = sel["output_path"]
-        if not out:
-            QMessageBox.warning(self, "Missing filename", "Choose a save path.")
+    def _on_extract_marker_first_frame(self) -> None:
+        idx = self._selected_marker_index()
+        if idx < 0:
+            QMessageBox.information(
+                self, "No marker selected",
+                "Select a marker in the Markers list, then use this action.")
             return
-        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        reg = self._regions[idx]
+        self._extract_frame_at(reg.start, suffix=f"{reg.name or 'clip'}_first")
 
-        cmd = fx.build_single_frame_cmd(
-            input_path=self._current_file,
-            timestamp_seconds=ts,
-            output_path=out,
-            quality=int(sel["quality"]),
-        )
-        # Persist defaults from what was chosen.
-        self._settings.frame_format = sel["format"]
-        self._settings.frame_jpg_quality = int(sel["quality"])
-        self._settings.frame_output_dir = os.path.dirname(out)
-        app_settings.save(self._settings)
-
-        self._run_ffmpeg_async(cmd, total_duration=0.001,
-                               output_path=out, label="Extract frame")
+    def _on_extract_marker_last_frame(self) -> None:
+        idx = self._selected_marker_index()
+        if idx < 0:
+            QMessageBox.information(
+                self, "No marker selected",
+                "Select a marker in the Markers list, then use this action.")
+            return
+        reg = self._regions[idx]
+        frame_period = self._media_info.frame_period() if self._media_info else 0.04
+        t = max(reg.start, reg.end - frame_period)
+        self._extract_frame_at(t, suffix=f"{reg.name or 'clip'}_last")
 
     def _on_extract_all_frames(self) -> None:
         if not self._media_info or not self._current_file:

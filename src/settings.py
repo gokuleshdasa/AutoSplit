@@ -24,6 +24,10 @@ DEFAULT_KEYBINDINGS: Dict[str, tuple[str, str]] = {
     "mark_out":     ("Mark OUT at playhead",            "O"),
     "add_marker":   ("Add region from IN/OUT",          "M"),
     "toggle_snap":  ("Toggle snap (1s ↔ 1 frame)",      "S"),
+    "toggle_loop":  ("Toggle loop-play region",          "L"),
+    "speed_down":   ("Playback speed  ×0.5",             "["),
+    "speed_up":     ("Playback speed  ×2",               "]"),
+    "speed_reset":  ("Playback speed 1×",                "\\"),
     "open_file":    ("Open file…",                      "Ctrl+O"),
     "preferences":  ("Preferences…",                    "Ctrl+,"),
 }

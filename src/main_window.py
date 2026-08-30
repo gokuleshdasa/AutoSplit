@@ -138,6 +138,9 @@ class MainWindow(QMainWindow):
         # Filmstrip worker refs (kept alive to prevent Python GC dropping them).
         self._filmstrip_thread = None
         self._filmstrip_worker = None
+        # Loop-play state (L toggles). When on and a marker is selected, playback
+        # cycles within that marker's IN/OUT; otherwise within the top-level IN/OUT.
+        self._loop_enabled: bool = False
 
         self._build_ui()
         self._wire_shortcuts()
@@ -482,15 +485,37 @@ class MainWindow(QMainWindow):
         # Second row: jump / frame actions on the selected marker.
         row2 = QHBoxLayout()
         row2.setSpacing(6)
-        self.jump_first_btn = QPushButton("|◀ First frame")
+        self.jump_first_btn = QPushButton("|◀ First")
         self.jump_first_btn.setToolTip("Jump the playhead to the selected marker's IN")
         self.jump_first_btn.clicked.connect(lambda: self._on_marker_jump("first"))
         row2.addWidget(self.jump_first_btn)
-        self.jump_last_btn = QPushButton("Last frame ▶|")
+        self.jump_last_btn = QPushButton("Last ▶|")
         self.jump_last_btn.setToolTip("Jump the playhead to the selected marker's OUT")
         self.jump_last_btn.clicked.connect(lambda: self._on_marker_jump("last"))
         row2.addWidget(self.jump_last_btn)
+        self.loop_btn = QPushButton("Loop")
+        self.loop_btn.setCheckable(True)
+        self.loop_btn.setToolTip("Loop playback within the selected marker's IN/OUT (L)")
+        self.loop_btn.toggled.connect(self._on_loop_button_toggled)
+        row2.addWidget(self.loop_btn)
         v.addLayout(row2)
+
+        # Third row: batch operations on the markers list.
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        self.save_markers_btn = QPushButton("Save…")
+        self.save_markers_btn.setToolTip("Save all markers to a JSON file")
+        self.save_markers_btn.clicked.connect(self._on_save_markers)
+        row3.addWidget(self.save_markers_btn)
+        self.load_markers_btn = QPushButton("Load…")
+        self.load_markers_btn.setToolTip("Load markers from a JSON file (replaces current)")
+        self.load_markers_btn.clicked.connect(self._on_load_markers)
+        row3.addWidget(self.load_markers_btn)
+        self.batch_rename_btn = QPushButton("Batch rename…")
+        self.batch_rename_btn.setToolTip("Rename every marker with a pattern (e.g. clip_%02d)")
+        self.batch_rename_btn.clicked.connect(self._on_batch_rename_markers)
+        row3.addWidget(self.batch_rename_btn)
+        v.addLayout(row3)
 
         self.markers_list = QListWidget()
         self.markers_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
@@ -610,6 +635,10 @@ class MainWindow(QMainWindow):
             "mark_out":       self._on_set_end_at_playhead,
             "add_marker":     self._on_add_marker,
             "toggle_snap":    self._toggle_snap,
+            "toggle_loop":    self._toggle_loop_play,
+            "speed_down":     lambda: self._adjust_playback_rate(0.5),
+            "speed_up":       lambda: self._adjust_playback_rate(2.0),
+            "speed_reset":    lambda: self._set_playback_rate(1.0),
             "open_file":      self._on_open_file,
             "preferences":    self._on_open_preferences,
         }
@@ -784,7 +813,49 @@ class MainWindow(QMainWindow):
         pos_s = self.player.position() / 1000.0
         dur_s = self._media_info.duration_seconds
         self.timeline.set_position(pos_s)
-        self.time_label.setText(f"{fmt_time(pos_s)} / {fmt_time(dur_s)}")
+        rate_txt = f"   ×{self.player.playbackRate():g}" if abs(self.player.playbackRate() - 1.0) > 0.01 else ""
+        loop_txt = "   LOOP" if self._loop_enabled else ""
+        self.time_label.setText(f"{fmt_time(pos_s)} / {fmt_time(dur_s)}{rate_txt}{loop_txt}")
+
+        # Loop-play enforcement. Cycle within selected marker's IN/OUT, else
+        # top-level IN/OUT if any, else full duration.
+        if self._loop_enabled and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            idx = self._selected_marker_index()
+            if idx >= 0:
+                loop_start = self._regions[idx].start
+                loop_end = self._regions[idx].end
+            else:
+                loop_start = self.timeline.start()
+                loop_end = self.timeline.end()
+            if loop_end > loop_start and pos_s >= loop_end - 0.02:
+                self.player.setPosition(int(loop_start * 1000))
+
+    def _toggle_loop_play(self) -> None:
+        self._loop_enabled = not self._loop_enabled
+        if self._loop_enabled:
+            idx = self._selected_marker_index()
+            if idx >= 0:
+                reg = self._regions[idx]
+                msg = f"Loop ON  ·  {reg.name or f'clip {idx+1}'}  ·  {fmt_time(reg.start)} → {fmt_time(reg.end)}"
+            else:
+                msg = f"Loop ON  ·  IN/OUT range  ({fmt_time(self.timeline.start())} → {fmt_time(self.timeline.end())})"
+        else:
+            msg = "Loop OFF"
+        self.statusBar().showMessage(msg, 3000)
+        self.loop_btn.setChecked(self._loop_enabled)
+
+    def _set_playback_rate(self, rate: float) -> None:
+        rate = max(0.1, min(8.0, rate))
+        self.player.setPlaybackRate(rate)
+        self.statusBar().showMessage(f"Playback speed  ×{rate:g}", 2500)
+
+    def _adjust_playback_rate(self, factor: float) -> None:
+        new_rate = self.player.playbackRate() * factor
+        # Snap to standard rates.
+        for r in (0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0):
+            if abs(new_rate - r) < 0.05 * r:
+                new_rate = r; break
+        self._set_playback_rate(new_rate)
 
     def _on_seek(self, seconds: float) -> None:
         self.player.setPosition(int(seconds * 1000))
@@ -1063,12 +1134,27 @@ class MainWindow(QMainWindow):
             return
         reg = self._regions[idx]
         if which == "first":
-            self.player.setPosition(int(max(0.0, reg.start) * 1000))
+            target = max(0.0, reg.start)
         else:
-            # Seek to just before the last frame so the frame is visible.
+            # Windows Media Foundation (Qt's Windows backend) seeks to the
+            # NEAREST KEYFRAME by default — for H.264 with long GOPs this
+            # can land 2-5 seconds before the requested time (which reads
+            # as 'jumped to the middle of the region').
+            # Nudge back a hair from the exact end, pause first so the
+            # decoder is idle when the seek lands, then optionally play.
             frame_period = self._media_info.frame_period() if self._media_info else 0.04
-            target = max(reg.start, reg.end - frame_period)
-            self.player.setPosition(int(target * 1000))
+            # A tiny offset (2 frame periods) is enough to keep us inside the
+            # region even when the region end === media duration.
+            target = max(reg.start, reg.end - 2 * frame_period)
+        # Pausing before the seek makes the Windows backend more accurate.
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        self.player.setPosition(int(target * 1000))
+        # Update the timeline immediately so the playhead moves before the
+        # player's own polling catches up (WMF can lag by several frames).
+        self.timeline.set_position(target)
+        self.time_label.setText(
+            f"{fmt_time(target)} / {fmt_time(self._media_info.duration_seconds if self._media_info else 0)}")
 
     def _on_marker_context_menu(self, pos) -> None:
         item = self.markers_list.itemAt(pos)
@@ -1114,6 +1200,109 @@ class MainWindow(QMainWindow):
             self._on_rename_marker()
         elif chosen is act_delete:
             self._on_delete_marker()
+
+    def _on_loop_button_toggled(self, on: bool) -> None:
+        # Sync button state with keyboard-toggle state without infinite bounce.
+        if on != self._loop_enabled:
+            self._toggle_loop_play()
+
+    # --- Save / load / batch-rename markers --------------------------------
+    def _on_save_markers(self) -> None:
+        if not self._regions:
+            QMessageBox.information(self, "Nothing to save",
+                                    "There are no markers yet.")
+            return
+        base = os.path.splitext(os.path.basename(self._current_file))[0] if self._current_file else "markers"
+        default = os.path.join(self._settings.last_export_dir or "", f"{base}.markers.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save markers", default, "Markers JSON (*.json)"
+        )
+        if not path:
+            return
+        payload = {
+            "source": os.path.abspath(self._current_file) if self._current_file else "",
+            "duration": self._media_info.duration_seconds if self._media_info else 0,
+            "regions": [
+                {"name": r.name, "start": r.start, "end": r.end}
+                for r in self._regions
+            ],
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                import json
+                json.dump(payload, f, indent=2)
+            self.statusBar().showMessage(f"Saved {len(self._regions)} markers → {path}", 4000)
+        except OSError as e:
+            QMessageBox.critical(self, "Save failed", str(e))
+
+    def _on_load_markers(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load markers", "", "Markers JSON (*.json);;All files (*.*)"
+        )
+        if not path:
+            return
+        try:
+            import json
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            raw = payload.get("regions", [])
+        except (OSError, json.JSONDecodeError) as e:
+            QMessageBox.critical(self, "Load failed", str(e))
+            return
+        new_regions: list[Region] = []
+        for r in raw:
+            try:
+                new_regions.append(Region(
+                    start=float(r["start"]),
+                    end=float(r["end"]),
+                    name=str(r.get("name", "")),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not new_regions:
+            QMessageBox.warning(self, "No usable markers", "The JSON had no valid regions.")
+            return
+        if self._regions:
+            ans = QMessageBox.question(
+                self, "Replace markers",
+                f"Load {len(new_regions)} marker(s)?\n\n"
+                "Yes = replace current markers\nNo = append to current"
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                self._regions.clear()
+            elif ans != QMessageBox.StandardButton.No:
+                return
+        self._regions.extend(new_regions)
+        self._refresh_markers_ui()
+        self.statusBar().showMessage(f"Loaded {len(new_regions)} markers.", 3000)
+        if not self._is_markers_mode():
+            self.mode_markers_rb.setChecked(True)
+
+    def _on_batch_rename_markers(self) -> None:
+        if not self._regions:
+            return
+        pattern, ok = QInputDialog.getText(
+            self, "Batch rename markers",
+            "Filename-safe pattern.  Placeholders:\n"
+            "  {n}    1-based index (padded to 3)\n"
+            "  {name} original name\n"
+            "  {i}    1-based unpadded index\n"
+            "  {mmss} start time  mm:ss\n\n"
+            "Example: clip_{n}    or   scene_{n}_{name}",
+            text="clip_{n}"
+        )
+        if not ok or not pattern.strip():
+            return
+        pattern = pattern.strip()
+        for i, reg in enumerate(self._regions):
+            mins = int(reg.start // 60); secs = int(reg.start - mins * 60)
+            new_name = (pattern
+                        .replace("{n}", f"{i + 1:03d}")
+                        .replace("{i}", str(i + 1))
+                        .replace("{name}", reg.name)
+                        .replace("{mmss}", f"{mins:02d}{secs:02d}"))
+            reg.name = sanitize_name(new_name) or f"clip_{i + 1:03d}"
+        self._refresh_markers_ui()
 
     def _extract_frame_at(self, timestamp: float, suffix: str = "") -> None:
         """Grab one frame at `timestamp` using the current defaults, then optionally

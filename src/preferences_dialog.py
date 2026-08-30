@@ -4,9 +4,9 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QGroupBox, QHBoxLayout, QKeySequenceEdit, QLabel, QPushButton, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QKeySequenceEdit,
+    QLabel, QLineEdit, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ffmpeg_utils import AUDIO_BITRATES, VIDEO_QUALITY
@@ -28,6 +28,7 @@ class PreferencesDialog(QDialog):
         tabs.addTab(self._build_keys_tab(), "Keyboard")
         tabs.addTab(self._build_playback_tab(), "Playback")
         tabs.addTab(self._build_export_tab(), "Export defaults")
+        tabs.addTab(self._build_frames_gif_tab(), "Frames && GIF")
         root.addWidget(tabs, 1)
 
         btns = QDialogButtonBox(
@@ -121,6 +122,111 @@ class PreferencesDialog(QDialog):
         v.addStretch(1)
         return w
 
+    def _build_frames_gif_tab(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.addWidget(QLabel(
+            "Defaults for the Export button's dropdown menu: Extract frame, "
+            "Extract all frames, and Export as GIF."))
+
+        # --- Prompt behavior ---
+        gb0 = QGroupBox("When you use the Export menu")
+        g0 = QVBoxLayout(gb0)
+        self.prompt_frame_cb = QCheckBox("Ask for options before Extract Frame / Extract All Frames")
+        self.prompt_frame_cb.setChecked(self._settings.prompt_before_frame_export)
+        g0.addWidget(self.prompt_frame_cb)
+        self.prompt_gif_cb = QCheckBox("Ask for options before Export as GIF")
+        self.prompt_gif_cb.setChecked(self._settings.prompt_before_gif_export)
+        g0.addWidget(self.prompt_gif_cb)
+        g0.addWidget(QLabel(
+            "Unchecked = one-click export using the defaults below.",
+            objectName="Muted"))
+        v.addWidget(gb0)
+
+        # --- Frame defaults ---
+        gb = QGroupBox("Frame extraction defaults")
+        form = QFormLayout(gb)
+        self.frame_fmt_combo = QComboBox()
+        for label, key in (("PNG", "png"), ("JPEG", "jpg"), ("WebP", "webp")):
+            self.frame_fmt_combo.addItem(label, key)
+        idx = self.frame_fmt_combo.findData(self._settings.frame_format)
+        if idx >= 0:
+            self.frame_fmt_combo.setCurrentIndex(idx)
+        form.addRow("Image format:", self.frame_fmt_combo)
+
+        self.frame_q_spin = QSpinBox()
+        self.frame_q_spin.setRange(2, 31)
+        self.frame_q_spin.setValue(self._settings.frame_jpg_quality)
+        form.addRow("JPEG/WebP quality:", self.frame_q_spin)
+
+        self.frame_fps_spin = QDoubleSpinBox()
+        self.frame_fps_spin.setRange(0.0, 240.0)
+        self.frame_fps_spin.setSingleStep(0.5)
+        self.frame_fps_spin.setValue(self._settings.frame_all_fps)
+        self.frame_fps_spin.setSpecialValueText("Source native (0)")
+        form.addRow("'All frames' rate (fps):", self.frame_fps_spin)
+
+        row1 = QHBoxLayout()
+        self.frame_dir_edit = QLineEdit(self._settings.frame_output_dir)
+        self.frame_dir_edit.setPlaceholderText("Empty = save next to the source file")
+        row1.addWidget(self.frame_dir_edit, 1)
+        b1 = QPushButton("Browse…")
+        b1.clicked.connect(lambda: self._browse_into(self.frame_dir_edit))
+        row1.addWidget(b1)
+        wrap1 = QWidget(); wrap1.setLayout(row1)
+        form.addRow("Output folder:", wrap1)
+        v.addWidget(gb)
+
+        # --- GIF defaults ---
+        gb2 = QGroupBox("GIF export defaults")
+        form2 = QFormLayout(gb2)
+        self.gif_fps_spin = QSpinBox()
+        self.gif_fps_spin.setRange(2, 60)
+        self.gif_fps_spin.setValue(self._settings.gif_fps)
+        form2.addRow("Frame rate (fps):", self.gif_fps_spin)
+
+        self.gif_width_combo = QComboBox()
+        for w2 in (240, 320, 480, 640, 720, 960, 1080, 1280):
+            self.gif_width_combo.addItem(f"{w2} px", w2)
+        self.gif_width_combo.addItem("Original", 0)
+        for i in range(self.gif_width_combo.count()):
+            if self.gif_width_combo.itemData(i) == self._settings.gif_width:
+                self.gif_width_combo.setCurrentIndex(i)
+                break
+        form2.addRow("Width:", self.gif_width_combo)
+
+        self.gif_dither_combo = QComboBox()
+        for label, key in (
+            ("Bayer",           "bayer"),
+            ("Floyd-Steinberg", "floyd_steinberg"),
+            ("Sierra 2-4a",     "sierra2_4a"),
+            ("None",            "none"),
+        ):
+            self.gif_dither_combo.addItem(label, key)
+        idx = self.gif_dither_combo.findData(self._settings.gif_dither)
+        if idx >= 0:
+            self.gif_dither_combo.setCurrentIndex(idx)
+        form2.addRow("Dither:", self.gif_dither_combo)
+
+        row2 = QHBoxLayout()
+        self.gif_dir_edit = QLineEdit(self._settings.gif_output_dir)
+        self.gif_dir_edit.setPlaceholderText("Empty = save next to the source file")
+        row2.addWidget(self.gif_dir_edit, 1)
+        b2 = QPushButton("Browse…")
+        b2.clicked.connect(lambda: self._browse_into(self.gif_dir_edit))
+        row2.addWidget(b2)
+        wrap2 = QWidget(); wrap2.setLayout(row2)
+        form2.addRow("Output folder:", wrap2)
+        v.addWidget(gb2)
+
+        v.addStretch(1)
+        return w
+
+    def _browse_into(self, edit: QLineEdit) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Choose output folder", edit.text() or "")
+        if d:
+            edit.setText(d)
+
     # --- actions ------------------------------------------------------------
     def _on_restore_defaults(self) -> None:
         for aid, (_lbl, default) in DEFAULT_KEYBINDINGS.items():
@@ -132,6 +238,20 @@ class PreferencesDialog(QDialog):
             if self.video_quality_combo.itemData(i) == 18:
                 self.video_quality_combo.setCurrentIndex(i)
                 break
+        # Frames + GIF defaults
+        self.prompt_frame_cb.setChecked(True)
+        self.prompt_gif_cb.setChecked(True)
+        self.frame_fmt_combo.setCurrentIndex(self.frame_fmt_combo.findData("png"))
+        self.frame_q_spin.setValue(2)
+        self.frame_fps_spin.setValue(1.0)
+        self.frame_dir_edit.setText("")
+        self.gif_fps_spin.setValue(15)
+        for i in range(self.gif_width_combo.count()):
+            if self.gif_width_combo.itemData(i) == 480:
+                self.gif_width_combo.setCurrentIndex(i)
+                break
+        self.gif_dither_combo.setCurrentIndex(self.gif_dither_combo.findData("bayer"))
+        self.gif_dir_edit.setText("")
 
     def _on_accept(self) -> None:
         # Check for duplicate bindings.
@@ -163,4 +283,15 @@ class PreferencesDialog(QDialog):
         crf = self.video_quality_combo.currentData()
         if isinstance(crf, int):
             base.video_crf = crf
+        # Frames + GIF tab
+        base.prompt_before_frame_export = self.prompt_frame_cb.isChecked()
+        base.prompt_before_gif_export = self.prompt_gif_cb.isChecked()
+        base.frame_format = self.frame_fmt_combo.currentData() or "png"
+        base.frame_jpg_quality = int(self.frame_q_spin.value())
+        base.frame_all_fps = float(self.frame_fps_spin.value())
+        base.frame_output_dir = self.frame_dir_edit.text().strip()
+        base.gif_fps = int(self.gif_fps_spin.value())
+        base.gif_width = int(self.gif_width_combo.currentData() or 0)
+        base.gif_dither = self.gif_dither_combo.currentData() or "bayer"
+        base.gif_output_dir = self.gif_dir_edit.text().strip()
         return base

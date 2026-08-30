@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
-from PySide6.QtGui import QPainter, QColor, QPen, QMouseEvent, QPaintEvent, QPixmap
+from PySide6.QtGui import QPainter, QColor, QPen, QMouseEvent, QPaintEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QWidget, QSizePolicy
 
 from regions import Region
@@ -68,6 +68,12 @@ class Timeline(QWidget):
         # Live drag-select overlay (Alt+drag).
         self._select_anchor: Optional[float] = None
         self._select_cursor: Optional[float] = None
+        # Zoom and pan.
+        self._zoom = 1.0            # 1.0 = fit full duration; >1 zooms in
+        self._view_start = 0.0      # seconds at left edge of the visible track
+        # Filmstrip (video thumbnails across the track).
+        self._show_filmstrip = False
+        self._filmstrip_frames: List[QPixmap] = []
 
     # --- public API ---------------------------------------------------------
     def set_duration(self, seconds: float) -> None:
@@ -130,6 +136,50 @@ class Timeline(QWidget):
         self._show_split_ticks = bool(show)
         self.update()
 
+    def zoom(self) -> float:
+        return self._zoom
+
+    def visible_span(self) -> float:
+        return self._duration / max(0.01, self._zoom) if self._duration > 0 else 0.0
+
+    def view_start(self) -> float:
+        return self._view_start
+
+    def set_zoom(self, zoom: float, center_seconds: Optional[float] = None) -> None:
+        """Set zoom (>=1). If center_seconds is given, that point stays fixed
+        on screen; otherwise centered on the current playhead."""
+        z = max(1.0, min(500.0, float(zoom)))
+        if abs(z - self._zoom) < 1e-4:
+            return
+        old_span = self.visible_span() or (self._duration or 1.0)
+        anchor = center_seconds if center_seconds is not None else self._position
+        # Fraction of the visible range where the anchor sits.
+        frac = 0.5 if old_span <= 0 else max(0.0, min(1.0, (anchor - self._view_start) / old_span))
+        self._zoom = z
+        new_span = self._duration / max(0.01, self._zoom)
+        self._view_start = max(0.0, min(anchor - frac * new_span,
+                                        max(0.0, self._duration - new_span)))
+        self.update()
+
+    def pan(self, delta_seconds: float) -> None:
+        span = self.visible_span()
+        self._view_start = max(0.0, min(self._view_start + delta_seconds,
+                                        max(0.0, self._duration - span)))
+        self.update()
+
+    def set_show_filmstrip(self, show: bool) -> None:
+        self._show_filmstrip = bool(show)
+        if not show:
+            self._filmstrip_frames = []
+        self.update()
+
+    def show_filmstrip(self) -> bool:
+        return self._show_filmstrip
+
+    def set_filmstrip_frames(self, frames: List[QPixmap]) -> None:
+        self._filmstrip_frames = list(frames)
+        self.update()
+
     def set_simple_mode(self, simple: bool) -> None:
         """Hide IN/OUT markers, region overlays, and split ticks. Just show
         waveform + playhead — useful when embedded in a preview area."""
@@ -163,15 +213,18 @@ class Timeline(QWidget):
         r = self._track_rect()
         if self._duration <= 0:
             return r.left()
-        frac = max(0.0, min(1.0, seconds / self._duration))
+        span = self.visible_span() or self._duration
+        frac = (seconds - self._view_start) / span
+        # Allow off-screen coordinates (caller can clip); do not clamp here.
         return r.left() + frac * r.width()
 
     def _seconds_for(self, x: float) -> float:
         r = self._track_rect()
         if r.width() <= 0 or self._duration <= 0:
             return 0.0
+        span = self.visible_span() or self._duration
         frac = (x - r.left()) / r.width()
-        return max(0.0, min(1.0, frac)) * self._duration
+        return max(0.0, min(1.0, self._view_start / self._duration + frac * (span / self._duration))) * self._duration
 
     # --- helpers ------------------------------------------------------------
     def seconds_at_pixel(self, x: float) -> float:
@@ -248,6 +301,23 @@ class Timeline(QWidget):
             self.scrubbing.emit(secs)
             self.update()
 
+    def wheelEvent(self, ev: QWheelEvent) -> None:
+        # Ctrl + wheel = zoom around cursor. Wheel alone = horizontal pan.
+        if self._duration <= 0:
+            return
+        anchor_secs = self._seconds_for(ev.position().x())
+        if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            steps = ev.angleDelta().y() / 120.0
+            factor = 1.25 ** steps
+            self.set_zoom(self._zoom * factor, center_seconds=anchor_secs)
+            ev.accept()
+        else:
+            # Pan proportional to visible span so panning feels the same at all zooms.
+            span = self.visible_span()
+            delta = -ev.angleDelta().y() / 120.0 * (span * 0.10)
+            self.pan(delta)
+            ev.accept()
+
     def mouseReleaseEvent(self, _ev: QMouseEvent) -> None:
         was_selecting = (self._drag_mode == "select"
                          and self._select_anchor is not None
@@ -278,13 +348,36 @@ class Timeline(QWidget):
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Load a media file to see its timeline")
             return
 
-        # Waveform image (stretched to fit the track).
+        # Global clip: everything below is drawn only inside the track.
+        p.save()
+        p.setClipRect(r.adjusted(-1, -14, 1, 14))
+
+        # Waveform image (stretched to fit the current view — zoom-aware).
         if self._waveform is not None and not self._waveform.isNull():
-            p.save()
-            p.setClipRect(r)
+            span = self.visible_span() or self._duration
+            src_w = self._waveform.width()
+            src_h = self._waveform.height()
+            src_x = int(src_w * (self._view_start / max(0.001, self._duration)))
+            src_wv = int(src_w * (span / max(0.001, self._duration)))
+            src = QRectF(src_x, 0, max(1, src_wv), src_h)
             target = QRectF(r.left(), r.top() + 4, r.width(), r.height() - 8)
-            p.drawPixmap(target, self._waveform, QRectF(self._waveform.rect()))
-            p.restore()
+            p.drawPixmap(target, self._waveform, src)
+
+        # Filmstrip: draw evenly-spaced thumbnails across the current view.
+        if self._show_filmstrip and self._filmstrip_frames:
+            band_h = min(46, int(r.height() * 0.55))
+            band_top = r.top() + 3
+            n = len(self._filmstrip_frames)
+            span = self.visible_span() or self._duration
+            for i, pm in enumerate(self._filmstrip_frames):
+                if pm is None or pm.isNull():
+                    continue
+                t = i / max(1, n - 1)
+                cx = self._x_for(self._view_start + t * span)
+                w = max(48, int(r.width() / max(6, n)))
+                x = cx - w / 2
+                p.drawPixmap(QRectF(x, band_top, w, band_h), pm,
+                             QRectF(pm.rect()))
 
         # Named region overlays (skipped in simple mode).
         colors = [
@@ -299,7 +392,8 @@ class Timeline(QWidget):
             px = self._x_for(self._position)
             p.setPen(QPen(self._PLAYHEAD, 2))
             p.drawLine(QPointF(px, r.top() - 4), QPointF(px, r.bottom() + 4))
-            # Position / duration text.
+            p.restore()   # release track clip
+            # Position / duration text (outside the clip so it's always visible).
             text_row = QRectF(4, 4, self.width() - 8, 20)
             p.setPen(self._TEXT)
             p.drawText(text_row,
@@ -373,8 +467,10 @@ class Timeline(QWidget):
                    f"Duration: {_fmt(self._duration)} ")
         end_txt = _fmt(self._end) if self.has_explicit_end() else "end"
         n = self._segment_count()
+        zoom_txt = f"  ·  zoom {self._zoom:.1f}x" if self._zoom > 1.01 else ""
         p.drawText(text_row, Qt.AlignmentFlag.AlignCenter,
-                   f"Start {_fmt(self._start)} → End {end_txt}  ·  {n} segment{'s' if n != 1 else ''} × {_fmt(self._split)}")
+                   f"Start {_fmt(self._start)} → End {end_txt}  ·  {n} segment{'s' if n != 1 else ''} × {_fmt(self._split)}{zoom_txt}")
+        p.restore()   # release track clip
 
     def _segment_boundaries(self) -> list[float]:
         eff_end = self.end()

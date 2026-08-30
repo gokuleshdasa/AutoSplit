@@ -52,6 +52,21 @@ class AppSettings:
     join_output_format_video: str = "mp4_h264"
     join_output_format_audio: str = "mp3"
     join_always_reencode: bool = False               # False = auto-pick fast when compatible
+    # --- Frame extraction ---
+    frame_format: str = "png"                         # 'png' | 'jpg' | 'webp'
+    frame_jpg_quality: int = 2                        # ffmpeg -q:v (2 = high)
+    frame_all_fps: float = 1.0                        # 0 = source native rate
+    frame_output_dir: str = ""                        # empty = subfolder next to media
+    frame_range: str = "in_out"                       # 'full' | 'in_out'
+    # --- GIF export ---
+    gif_fps: int = 15
+    gif_width: int = 480
+    gif_dither: str = "bayer"
+    gif_loop_forever: bool = True
+    gif_output_dir: str = ""
+    # Prompt-vs-1-click behavior for the split-button menu items.
+    prompt_before_frame_export: bool = True
+    prompt_before_gif_export: bool = True
 
 
 def _q() -> QSettings:
@@ -87,6 +102,19 @@ def load() -> AppSettings:
     s.join_output_format_video = q.value("join_output_format_video", s.join_output_format_video, type=str)
     s.join_output_format_audio = q.value("join_output_format_audio", s.join_output_format_audio, type=str)
     s.join_always_reencode = _to_bool(q.value("join_always_reencode", s.join_always_reencode))
+    # Frames / GIF
+    s.frame_format = q.value("frame_format", s.frame_format, type=str)
+    s.frame_jpg_quality = int(q.value("frame_jpg_quality", s.frame_jpg_quality))
+    s.frame_all_fps = float(q.value("frame_all_fps", s.frame_all_fps))
+    s.frame_output_dir = q.value("frame_output_dir", s.frame_output_dir, type=str)
+    s.frame_range = q.value("frame_range", s.frame_range, type=str)
+    s.gif_fps = int(q.value("gif_fps", s.gif_fps))
+    s.gif_width = int(q.value("gif_width", s.gif_width))
+    s.gif_dither = q.value("gif_dither", s.gif_dither, type=str)
+    s.gif_loop_forever = _to_bool(q.value("gif_loop_forever", s.gif_loop_forever))
+    s.gif_output_dir = q.value("gif_output_dir", s.gif_output_dir, type=str)
+    s.prompt_before_frame_export = _to_bool(q.value("prompt_before_frame_export", s.prompt_before_frame_export))
+    s.prompt_before_gif_export = _to_bool(q.value("prompt_before_gif_export", s.prompt_before_gif_export))
 
     # Keybindings — start from defaults, override with any saved.
     kb = {aid: default for aid, (_lbl, default) in DEFAULT_KEYBINDINGS.items()}
@@ -120,6 +148,18 @@ def save(s: AppSettings) -> None:
     q.setValue("join_output_format_video", s.join_output_format_video)
     q.setValue("join_output_format_audio", s.join_output_format_audio)
     q.setValue("join_always_reencode", s.join_always_reencode)
+    q.setValue("frame_format", s.frame_format)
+    q.setValue("frame_jpg_quality", s.frame_jpg_quality)
+    q.setValue("frame_all_fps", s.frame_all_fps)
+    q.setValue("frame_output_dir", s.frame_output_dir)
+    q.setValue("frame_range", s.frame_range)
+    q.setValue("gif_fps", s.gif_fps)
+    q.setValue("gif_width", s.gif_width)
+    q.setValue("gif_dither", s.gif_dither)
+    q.setValue("gif_loop_forever", s.gif_loop_forever)
+    q.setValue("gif_output_dir", s.gif_output_dir)
+    q.setValue("prompt_before_frame_export", s.prompt_before_frame_export)
+    q.setValue("prompt_before_gif_export", s.prompt_before_gif_export)
 
     q.beginGroup("keybindings")
     for aid, seq in s.keybindings.items():

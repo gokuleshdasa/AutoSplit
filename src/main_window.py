@@ -16,12 +16,14 @@ from PySide6.QtWidgets import (
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
     QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
-    QStatusBar, QVBoxLayout, QWidget, QStyle,
+    QStatusBar, QToolButton, QVBoxLayout, QWidget, QStyle,
 )
 
 import ffmpeg_utils as fu
 import settings as app_settings
+import frame_extract as fx
 from export_worker import ExportJob, start_export
+from frame_dialog import AllFramesDialog, GifExportDialog, SingleFrameDialog
 from preferences_dialog import PreferencesDialog
 from regions import Region, sanitize_name
 from timeline import Timeline
@@ -43,6 +45,11 @@ QPushButton:pressed { background: #262626; }
 QPushButton#Primary { background: #0078d4; border: 1px solid #0078d4; color: white; font-weight: 600; padding: 8px 20px; }
 QPushButton#Primary:hover { background: #106ebe; }
 QPushButton#Primary:disabled { background: #444; color: #888; border-color: #444; }
+QToolButton#Primary { background: #0078d4; border: 1px solid #0078d4; color: white; font-weight: 600; padding: 8px 20px; border-radius: 4px; }
+QToolButton#Primary:hover { background: #106ebe; }
+QToolButton#Primary:disabled { background: #444; color: #888; border-color: #444; }
+QToolButton#Primary::menu-button { border: none; border-left: 1px solid rgba(255,255,255,0.35); width: 20px; }
+QToolButton#Primary::menu-arrow { image: none; }
 QPushButton#Danger { background: #a4262c; border-color: #a4262c; color: white; }
 QPushButton#Danger:hover { background: #b53037; }
 QCheckBox { spacing: 8px; }
@@ -225,6 +232,32 @@ class MainWindow(QMainWindow):
         self.timeline.context_requested.connect(self._on_timeline_context)
         self.timeline.range_selected.connect(self._on_range_selected)
         left_lay.addWidget(self.timeline)
+
+        # Zoom + filmstrip toolbar below the timeline.
+        tl_tools = QHBoxLayout()
+        tl_tools.setSpacing(4)
+        z_out = QPushButton("−")
+        z_out.setFixedWidth(30)
+        z_out.setToolTip("Zoom out")
+        z_out.clicked.connect(lambda: self._timeline_zoom(0.7))
+        tl_tools.addWidget(z_out)
+        z_in = QPushButton("+")
+        z_in.setFixedWidth(30)
+        z_in.setToolTip("Zoom in (also Ctrl+wheel over the timeline)")
+        z_in.clicked.connect(lambda: self._timeline_zoom(1.4))
+        tl_tools.addWidget(z_in)
+        z_fit = QPushButton("Fit")
+        z_fit.setToolTip("Zoom out to fit the whole media")
+        z_fit.clicked.connect(self._on_timeline_zoom_fit)
+        tl_tools.addWidget(z_fit)
+        self.filmstrip_btn = QPushButton("👁 Filmstrip")
+        self.filmstrip_btn.setCheckable(True)
+        self.filmstrip_btn.setToolTip("Show / hide video thumbnails across the timeline")
+        self.filmstrip_btn.toggled.connect(self._on_toggle_filmstrip)
+        tl_tools.addWidget(self.filmstrip_btn)
+        tl_tools.addStretch(1)
+        left_lay.addLayout(tl_tools)
+
         hint = QLabel(
             "Left-drag = seek  ·  <b>Alt-drag = highlight to add region</b>  ·  Shift-drag = IN  ·  Ctrl-drag = OUT  ·  "
             "Right-click = menu  ·  I/O = mark  ·  M = add  ·  S = toggle 1 s ↔ 1 frame  ·  "
@@ -282,9 +315,28 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setVisible(False)
         self.cancel_btn.clicked.connect(self._on_cancel)
         exp_row.addWidget(self.cancel_btn)
-        self.export_btn = QPushButton("Export", objectName="Primary")
+        # Split-button Export: default click runs segment export; a dropdown
+        # arrow opens a menu with frame extraction and GIF options.
+        self.export_btn = QToolButton()
+        self.export_btn.setText("Export")
+        self.export_btn.setObjectName("Primary")
+        self.export_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.export_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self._on_export)
+        self.export_btn.clicked.connect(self._on_export)   # default action
+
+        menu = QMenu(self)
+        act_segs = menu.addAction("Export segments   (default)")
+        act_segs.triggered.connect(self._on_export)
+        menu.addSeparator()
+        act_frame_now = menu.addAction("Extract current frame…")
+        act_frame_now.triggered.connect(self._on_extract_current_frame)
+        act_frame_all = menu.addAction("Extract all frames…")
+        act_frame_all.triggered.connect(self._on_extract_all_frames)
+        menu.addSeparator()
+        act_gif = menu.addAction("Export as GIF…")
+        act_gif.triggered.connect(self._on_export_gif)
+        self.export_btn.setMenu(menu)
         exp_row.addWidget(self.export_btn)
         bottom_lay.addLayout(exp_row)
 
@@ -633,6 +685,8 @@ class MainWindow(QMainWindow):
         self.timeline.set_start(0.0)
         self.timeline.set_end(-1.0)
         self.timeline.set_waveform(None)
+        self.timeline.set_filmstrip_frames([])
+        self.timeline.set_zoom(1.0, center_seconds=0.0)
         self._regions.clear()
         self._refresh_markers_ui()
         self._sync_split_from_input()
@@ -640,6 +694,9 @@ class MainWindow(QMainWindow):
         self.end_input.setText("")
         # Kick off waveform generation on a worker thread.
         self._start_waveform(path)
+        # Re-generate filmstrip if the toggle is on.
+        if self.filmstrip_btn.isChecked() and info.has_video:
+            self._load_filmstrip()
 
         # Populate format options based on media capabilities.
         self.format_combo.blockSignals(True)
@@ -1278,6 +1335,318 @@ class MainWindow(QMainWindow):
                 output_path=out_path,
             ))
         return specs
+
+    # --- timeline zoom / filmstrip -----------------------------------------
+    def _timeline_zoom(self, factor: float) -> None:
+        self.timeline.set_zoom(self.timeline.zoom() * factor)
+
+    def _on_timeline_zoom_fit(self) -> None:
+        self.timeline.set_zoom(1.0, center_seconds=0.0)
+
+    def _on_toggle_filmstrip(self, on: bool) -> None:
+        self.timeline.set_show_filmstrip(on)
+        if on and self._media_info and self._media_info.has_video and self._current_file:
+            self._load_filmstrip()
+
+    def _load_filmstrip(self, n_frames: int = 24) -> None:
+        """Grab N evenly-spaced thumbnails and hand them to the Timeline."""
+        if not (self._media_info and self._current_file):
+            return
+        import subprocess, tempfile
+        dur = self._media_info.duration_seconds
+        if dur <= 0:
+            return
+        # We reuse ffmpeg's fps filter to grab N frames across the duration.
+        target_fps = max(n_frames / dur, 0.02)
+        pattern = os.path.join(tempfile.gettempdir(), f"autosplit_filmstrip_%03d.jpg")
+        # Clear old pattern files.
+        for i in range(200):
+            try:
+                os.remove(pattern.replace("%03d", f"{i:03d}"))
+            except OSError:
+                pass
+        cmd = [
+            fu.ffmpeg_path(), "-y", "-v", "error",
+            "-i", self._current_file,
+            "-vf", f"fps={target_fps},scale=160:-2",
+            "-q:v", "3",
+            pattern,
+        ]
+        from PySide6.QtCore import QThread as _QThread, QObject, Signal as _Signal
+        from PySide6.QtGui import QPixmap
+
+        class _FSWorker(QObject):
+            done = _Signal(list)
+            def __init__(self, cmd, pattern):
+                super().__init__()
+                self._cmd = cmd
+                self._pat = pattern
+            def run(self):
+                try:
+                    subprocess.run(self._cmd, capture_output=True,
+                                   **fu._no_window_kwargs())
+                except Exception:
+                    self.done.emit([]); return
+                pixmaps = []
+                for i in range(1, 401):
+                    p = self._pat.replace("%03d", f"{i:03d}")
+                    if not os.path.exists(p):
+                        break
+                    pm = QPixmap(p)
+                    if not pm.isNull():
+                        pixmaps.append(pm)
+                self.done.emit(pixmaps)
+
+        thread = _QThread()
+        worker = _FSWorker(cmd, pattern)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        def _on_done(pixmaps):
+            self.timeline.set_filmstrip_frames(pixmaps)
+            thread.quit()
+        worker.done.connect(_on_done)
+        worker.done.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    # --- Frame / GIF exports (split-button menu) ---------------------------
+    def _current_range(self) -> tuple[float, float]:
+        """Return (start, end) using IN/OUT if set, else the full media."""
+        if not self._media_info:
+            return (0.0, 0.0)
+        start = self.timeline.start()
+        end = self.timeline.end()
+        if end <= start:
+            end = self._media_info.duration_seconds
+        return (start, end)
+
+    def _run_ffmpeg_async(self, cmd: list, total_duration: float,
+                          output_path: str, label: str) -> None:
+        """Fire an ffmpeg command in a QThread with progress + completion UI."""
+        from PySide6.QtCore import QObject, QThread as _QThread, Signal as _Signal
+
+        class _Worker(QObject):
+            progress = _Signal(float)
+            done_ok  = _Signal(str)
+            failed   = _Signal(str)
+            def __init__(self, cmd, total, out):
+                super().__init__()
+                self._cmd = cmd
+                self._total = float(total)
+                self._out = out
+                self._cancel = False
+            def cancel(self): self._cancel = True
+            def run(self):
+                def on_progress(t):
+                    if self._total > 0:
+                        self.progress.emit(min(t / self._total, 1.0))
+                rc, tail = fu.run_ffmpeg(
+                    self._cmd,
+                    on_progress=on_progress,
+                    should_cancel=lambda: self._cancel,
+                )
+                if rc == 0:
+                    self.done_ok.emit(self._out)
+                else:
+                    self.failed.emit(f"ffmpeg exited with {rc}\n\n{tail[-1200:]}")
+
+        thread = _QThread()
+        worker = _Worker(cmd, total_duration, output_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def on_prog(f: float):
+            self.overall_bar.setValue(int(f * 1000))
+            self.status_label.setText(f"{label}: {int(f * 100)}%")
+
+        def on_ok(out: str):
+            self.overall_bar.setValue(1000)
+            self.status_label.setText(f"{label} complete ✓  ·  {out}")
+            self.export_btn.setEnabled(True)
+            self.export_btn.setText("Export")
+            self.cancel_btn.setVisible(False)
+            self._export_thread = None
+            self._export_worker = None
+            if self.open_folder_cb.isChecked():
+                self._open_folder(os.path.dirname(out) or out)
+            thread.quit()
+
+        def on_fail(msg: str):
+            self.export_btn.setEnabled(True)
+            self.export_btn.setText("Export")
+            self.cancel_btn.setVisible(False)
+            self._export_thread = None
+            self._export_worker = None
+            QMessageBox.critical(self, f"{label} failed", msg)
+            self.status_label.setText(f"{label} failed.")
+            thread.quit()
+
+        worker.progress.connect(on_prog)
+        worker.done_ok.connect(on_ok)
+        worker.failed.connect(on_fail)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        # Reuse the export cancel button.
+        self._export_thread = thread
+        self._export_worker = worker
+        self.export_btn.setEnabled(False)
+        self.export_btn.setText(f"{label}…")
+        self.cancel_btn.setVisible(True)
+        self.overall_bar.setValue(0)
+        self.status_label.setText(f"{label}…")
+        thread.start()
+
+    def _on_extract_current_frame(self) -> None:
+        if not self._media_info or not self._current_file:
+            return
+        ts = self.player.position() / 1000.0
+
+        prompt = self._settings.prompt_before_frame_export
+        if prompt:
+            dlg = SingleFrameDialog(self._settings, self._current_file, ts, self)
+            if dlg.exec() != SingleFrameDialog.DialogCode.Accepted:
+                return
+            sel = dlg.selection()
+        else:
+            fmt = self._settings.frame_format
+            folder = self._settings.frame_output_dir or os.path.dirname(self._current_file)
+            base = os.path.splitext(os.path.basename(self._current_file))[0]
+            sel = {
+                "format": fmt,
+                "quality": self._settings.frame_jpg_quality,
+                "output_path": os.path.join(folder, f"{base}_frame_{int(ts):04d}s.{fmt}"),
+            }
+
+        out = sel["output_path"]
+        if not out:
+            QMessageBox.warning(self, "Missing filename", "Choose a save path.")
+            return
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+        cmd = fx.build_single_frame_cmd(
+            input_path=self._current_file,
+            timestamp_seconds=ts,
+            output_path=out,
+            quality=int(sel["quality"]),
+        )
+        # Persist defaults from what was chosen.
+        self._settings.frame_format = sel["format"]
+        self._settings.frame_jpg_quality = int(sel["quality"])
+        self._settings.frame_output_dir = os.path.dirname(out)
+        app_settings.save(self._settings)
+
+        self._run_ffmpeg_async(cmd, total_duration=0.001,
+                               output_path=out, label="Extract frame")
+
+    def _on_extract_all_frames(self) -> None:
+        if not self._media_info or not self._current_file:
+            return
+        start, end = self._current_range()
+
+        if self._settings.prompt_before_frame_export:
+            dlg = AllFramesDialog(self._settings, self._current_file,
+                                  start, end, self._media_info.fps, self)
+            if dlg.exec() != AllFramesDialog.DialogCode.Accepted:
+                return
+            sel = dlg.selection()
+        else:
+            folder = self._settings.frame_output_dir or os.path.join(
+                os.path.dirname(self._current_file),
+                os.path.splitext(os.path.basename(self._current_file))[0] + "_frames"
+            )
+            sel = {
+                "format": self._settings.frame_format,
+                "quality": self._settings.frame_jpg_quality,
+                "fps": self._settings.frame_all_fps,
+                "range": self._settings.frame_range,
+                "output_dir": folder,
+                "prefix": "frame",
+            }
+
+        out_dir = sel["output_dir"]
+        os.makedirs(out_dir, exist_ok=True)
+        if sel["range"] == "full":
+            r_start, r_end = 0.0, self._media_info.duration_seconds
+        else:
+            r_start, r_end = start, end
+
+        job = fx.AllFramesJob(
+            input_path=self._current_file,
+            output_dir=out_dir,
+            start_seconds=r_start,
+            end_seconds=r_end,
+            fps=(sel["fps"] if sel["fps"] and sel["fps"] > 0 else None),
+            fmt=sel["format"],
+            prefix=sel["prefix"],
+            quality=int(sel["quality"]),
+        )
+        cmd = fx.build_all_frames_cmd(job)
+
+        self._settings.frame_format = sel["format"]
+        self._settings.frame_jpg_quality = int(sel["quality"])
+        self._settings.frame_all_fps = float(sel["fps"] or 0.0)
+        self._settings.frame_range = sel["range"]
+        self._settings.frame_output_dir = out_dir
+        app_settings.save(self._settings)
+
+        self._run_ffmpeg_async(cmd, total_duration=max(0.001, r_end - r_start),
+                               output_path=out_dir, label="Extract frames")
+
+    def _on_export_gif(self) -> None:
+        if not self._media_info or not self._current_file:
+            return
+        if not self._media_info.has_video:
+            QMessageBox.warning(self, "No video",
+                                "GIF export needs a video source (this file is audio-only).")
+            return
+        start, end = self._current_range()
+
+        if self._settings.prompt_before_gif_export:
+            dlg = GifExportDialog(self._settings, self._current_file, start, end, self)
+            if dlg.exec() != GifExportDialog.DialogCode.Accepted:
+                return
+            sel = dlg.selection()
+        else:
+            folder = self._settings.gif_output_dir or os.path.dirname(self._current_file)
+            base = os.path.splitext(os.path.basename(self._current_file))[0]
+            sel = {
+                "fps": self._settings.gif_fps,
+                "width": self._settings.gif_width,
+                "dither": self._settings.gif_dither,
+                "loop_forever": self._settings.gif_loop_forever,
+                "range": "in_out",
+                "output_path": os.path.join(folder, f"{base}.gif"),
+            }
+
+        out = sel["output_path"]
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        if sel["range"] == "full":
+            r_start, r_end = 0.0, self._media_info.duration_seconds
+        else:
+            r_start, r_end = start, end
+
+        job = fx.GifJob(
+            input_path=self._current_file,
+            output_path=out,
+            start_seconds=r_start,
+            end_seconds=r_end,
+            fps=int(sel["fps"]),
+            width=int(sel["width"]),
+            dither=sel["dither"],
+            loop_forever=bool(sel["loop_forever"]),
+        )
+        cmd = fx.build_gif_cmd(job)
+
+        self._settings.gif_fps = int(sel["fps"])
+        self._settings.gif_width = int(sel["width"])
+        self._settings.gif_dither = sel["dither"]
+        self._settings.gif_loop_forever = bool(sel["loop_forever"])
+        self._settings.gif_output_dir = os.path.dirname(out)
+        app_settings.save(self._settings)
+
+        self._run_ffmpeg_async(cmd, total_duration=max(0.001, r_end - r_start),
+                               output_path=out, label="Export GIF")
 
     def _save_current_settings(self, folder: str) -> None:
         s = self._settings

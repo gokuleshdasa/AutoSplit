@@ -24,10 +24,12 @@ from PySide6.QtWidgets import (
 import ffmpeg_utils as fu
 import settings as app_settings
 import frame_extract as fx
+import speed_export as sx
 from export_worker import ExportJob, start_export
 from frame_dialog import AllFramesDialog, GifExportDialog, SingleFrameDialog
 from preferences_dialog import PreferencesDialog
 from regions import Region, region_rgb, sanitize_name
+from speed_dialog import SpeedExportDialog
 from timeline import Timeline
 from waveform import start_waveform
 
@@ -350,6 +352,8 @@ class MainWindow(QMainWindow):
         act_marker_last = menu.addAction("Export selected marker → last frame…")
         act_marker_last.triggered.connect(self._on_extract_marker_last_frame)
         menu.addSeparator()
+        act_slomo = menu.addAction("Export with speed change / slow-motion…")
+        act_slomo.triggered.connect(self._on_export_speed)
         act_gif = menu.addAction("Export as GIF…")
         act_gif.triggered.connect(self._on_export_gif)
         self.export_btn.setMenu(menu)
@@ -1174,6 +1178,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         act_frame_first = menu.addAction("Export first frame…")
         act_frame_last  = menu.addAction("Export last frame…")
+        act_speed       = menu.addAction("Export with speed change / slow-motion…")
         menu.addSeparator()
         act_rename = menu.addAction("Rename…")
         act_delete = menu.addAction("Delete")
@@ -1196,6 +1201,8 @@ class MainWindow(QMainWindow):
             frame_period = self._media_info.frame_period() if self._media_info else 0.04
             t = max(reg.start, reg.end - frame_period)
             self._extract_frame_at(t, suffix=f"{reg.name or 'clip'}_last")
+        elif chosen is act_speed:
+            self._on_export_speed(in_seconds=reg.start, out_seconds=reg.end)
         elif chosen is act_rename:
             self._on_rename_marker()
         elif chosen is act_delete:
@@ -1944,6 +1951,69 @@ class MainWindow(QMainWindow):
 
         self._run_ffmpeg_async(cmd, total_duration=max(0.001, r_end - r_start),
                                output_path=out_dir, label="Extract frames")
+
+    def _on_export_speed(self, in_seconds: float = None, out_seconds: float = None) -> None:
+        """Speed-change export. If called with explicit start/end (from the
+        marker menu), pre-fill the dialog with those; otherwise use current
+        IN/OUT."""
+        if not self._media_info or not self._current_file:
+            return
+        if not self._media_info.has_video:
+            QMessageBox.warning(self, "No video",
+                                "Speed change is only meaningful for video files.")
+            return
+        if in_seconds is None or out_seconds is None:
+            in_seconds, out_seconds = self._current_range()
+
+        dlg = SpeedExportDialog(self._settings, self._current_file,
+                                in_seconds, out_seconds, self)
+        if dlg.exec() != SpeedExportDialog.DialogCode.Accepted:
+            return
+        sel = dlg.selection()
+
+        out = sel["output_path"]
+        if not out:
+            QMessageBox.warning(self, "Missing filename", "Choose a save path.")
+            return
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+        if sel["range"] == "full":
+            r_start, r_end = 0.0, self._media_info.duration_seconds
+        else:
+            r_start, r_end = in_seconds, out_seconds
+
+        speed = float(sel["speed"])
+        if speed <= 0:
+            QMessageBox.warning(self, "Invalid speed", "Speed must be a positive number.")
+            return
+
+        # Persist a couple of defaults so re-opening the dialog remembers them.
+        fmt_key = sel["output_format"]
+        self._settings.output_format_video = fmt_key
+        app_settings.save(self._settings)
+
+        job = sx.SpeedJob(
+            input_path=self._current_file,
+            output_path=out,
+            start_seconds=r_start,
+            end_seconds=r_end,
+            speed=speed,
+            interpolate=bool(sel["interpolate"]),
+            interpolate_fps=int(sel["interpolate_fps"]),
+            keep_audio=bool(sel["keep_audio"]),
+            video_crf=int(self.video_quality_combo.currentData()) if isinstance(self.video_quality_combo.currentData(), int) else 18,
+            audio_bitrate=self.audio_bitrate_combo.currentText() or "192k",
+            output_format=fmt_key,
+        )
+        cmd = sx.build_speed_cmd(job)
+
+        # Expected output duration: source_span / speed. Progress bar tracks
+        # the OUTPUT duration since ffmpeg's -progress reports output PTS.
+        src_span = max(0.001, r_end - r_start)
+        out_span = src_span / speed
+        label = ("Slow-mo" if speed < 1 else "Speed change") + (" (smooth)" if sel["interpolate"] else "")
+        self._run_ffmpeg_async(cmd, total_duration=out_span,
+                               output_path=out, label=label)
 
     def _on_export_gif(self) -> None:
         if not self._media_info or not self._current_file:

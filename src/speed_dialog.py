@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QRadioButton, QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
+import rife_setup
 from settings import AppSettings
 
 
@@ -81,18 +82,41 @@ class SpeedExportDialog(QDialog):
 
         v.addWidget(speed_gb)
 
-        # --- Motion interpolation ---
-        motion_gb = QGroupBox("Smooth motion")
+        # --- Interpolation engine ---
+        motion_gb = QGroupBox("Motion smoothing")
         mg = QVBoxLayout(motion_gb)
-        self.interp_cb = QCheckBox("Use motion interpolation (minterpolate — smoother, much slower render)")
-        self.interp_cb.setToolTip(
-            "Synthesises in-between frames using motion estimation. Best for slo-mo "
-            "when the source fps is low. Renders 5-10x slower."
-        )
-        mg.addWidget(self.interp_cb)
 
+        eng_row = QHBoxLayout()
+        eng_row.addWidget(QLabel("Engine:"))
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("Off  ·  frame-hold slo-mo (fastest)",       "off")
+        self.engine_combo.addItem("Classical  ·  ffmpeg minterpolate  (CPU)",  "minterpolate")
+        self.engine_combo.addItem("AI  ·  RIFE  (GPU-accelerated, best quality)", "rife")
+        self.engine_combo.setCurrentIndex(0)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        eng_row.addWidget(self.engine_combo, 1)
+        mg.addLayout(eng_row)
+
+        # Install button + status for RIFE.
+        self.rife_status = QLabel("")
+        self.rife_status.setObjectName("Muted")
+        self.rife_status.setWordWrap(True)
+        mg.addWidget(self.rife_status)
+
+        self.rife_install_btn = QPushButton("Install RIFE (~40 MB one-time download)")
+        self.rife_install_btn.clicked.connect(self._on_install_rife)
+        self.rife_install_btn.setVisible(False)
+        mg.addWidget(self.rife_install_btn)
+
+        self.rife_progress = QProgressBar()
+        self.rife_progress.setRange(0, 1000)
+        self.rife_progress.setValue(0)
+        self.rife_progress.setVisible(False)
+        mg.addWidget(self.rife_progress)
+
+        # Target fps for smoothed output.
         row = QHBoxLayout()
-        row.addWidget(QLabel("Target fps for interpolation:"))
+        row.addWidget(QLabel("Target output fps:"))
         self.interp_fps_combo = QComboBox()
         for f in (30, 48, 60, 90, 120):
             self.interp_fps_combo.addItem(f"{f} fps", f)
@@ -100,9 +124,15 @@ class SpeedExportDialog(QDialog):
         row.addWidget(self.interp_fps_combo)
         row.addStretch(1)
         mg.addLayout(row)
-        self.interp_cb.toggled.connect(self.interp_fps_combo.setEnabled)
-        self.interp_fps_combo.setEnabled(False)
+
+        # Legacy compat: keep .interp_cb as a checkbox-flavored proxy
+        # (main_window checks it for classical route).
+        self.interp_cb = QCheckBox()
+        self.interp_cb.setVisible(False)
+        mg.addWidget(self.interp_cb)
+
         v.addWidget(motion_gb)
+        self._on_engine_changed()
 
         # --- Range ---
         range_gb = QGroupBox("Range")
@@ -159,6 +189,83 @@ class SpeedExportDialog(QDialog):
         btns.rejected.connect(self.reject)
         v.addWidget(btns)
 
+    def _on_engine_changed(self, *_) -> None:
+        eng = self.engine_combo.currentData()
+        is_rife = (eng == "rife")
+        if is_rife:
+            if rife_setup.is_installed():
+                self.rife_status.setText(
+                    "✓ RIFE installed at %LOCALAPPDATA%\\AutoSplit\\rife\\  ·  will use GPU (Vulkan)"
+                )
+                self.rife_install_btn.setVisible(False)
+            else:
+                self.rife_status.setText(
+                    "RIFE isn't installed yet. Click below to download the "
+                    "official rife-ncnn-vulkan release from GitHub (Vulkan-based, "
+                    "works on any modern GPU)."
+                )
+                self.rife_install_btn.setVisible(True)
+        else:
+            self.rife_status.setText("")
+            self.rife_install_btn.setVisible(False)
+        # Sync legacy interp_cb for backwards-compat with main_window checks.
+        self.interp_cb.setChecked(eng in ("minterpolate", "rife"))
+
+    def _on_install_rife(self) -> None:
+        # Run the download+extract on a worker thread; keep the UI responsive.
+        self.rife_install_btn.setEnabled(False)
+        self.rife_install_btn.setText("Downloading…")
+        self.rife_progress.setVisible(True)
+        self.rife_progress.setValue(0)
+
+        class _Installer(QObject):
+            progress = Signal(float)
+            status = Signal(str)
+            done = Signal(bool, str)   # (ok, message-or-path)
+
+            def run(self):
+                try:
+                    p = rife_setup.install(
+                        on_progress=lambda f: self.progress.emit(f),
+                        on_status=lambda s: self.status.emit(s),
+                    )
+                    self.done.emit(True, str(p))
+                except Exception as e:
+                    self.done.emit(False, str(e))
+
+        thread = QThread(self)
+        worker = _Installer()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _on_prog(f):
+            self.rife_progress.setValue(int(f * 1000))
+
+        def _on_status(s):
+            self.rife_status.setText(s)
+
+        def _on_done(ok: bool, msg: str):
+            self.rife_progress.setVisible(False)
+            self.rife_install_btn.setEnabled(True)
+            self.rife_install_btn.setText("Install RIFE (~40 MB one-time download)")
+            thread.quit()
+            if ok:
+                self._on_engine_changed()
+                QMessageBox.information(self, "RIFE installed",
+                                        f"RIFE installed to:\n{msg}")
+            else:
+                QMessageBox.critical(self, "Install failed", msg)
+
+        worker.progress.connect(_on_prog)
+        worker.status.connect(_on_status)
+        worker.done.connect(_on_done)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # Keep a ref so Python GC doesn't drop the thread.
+        self._install_thread = thread
+        self._install_worker = worker
+        thread.start()
+
     def _on_preset_changed(self) -> None:
         val = self.preset_combo.currentData()
         if isinstance(val, float) and val > 0:
@@ -198,9 +305,11 @@ class SpeedExportDialog(QDialog):
 
     def selection(self) -> dict:
         speed = float(self.custom_spin.value())
+        engine = self.engine_combo.currentData() or "off"
         return {
             "speed": speed,
-            "interpolate": self.interp_cb.isChecked(),
+            "engine": engine,
+            "interpolate": engine in ("minterpolate", "rife"),
             "interpolate_fps": int(self.interp_fps_combo.currentData() or 60),
             "keep_audio": self.keep_audio_cb.isChecked(),
             "range": "full" if self.range_full.isChecked() else "in_out",

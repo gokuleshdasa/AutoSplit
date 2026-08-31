@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 import ffmpeg_utils as fu
+import rife_pipeline as rp
+import rife_setup
 import settings as app_settings
 import frame_extract as fx
 import speed_export as sx
@@ -1992,17 +1994,42 @@ class MainWindow(QMainWindow):
         self._settings.output_format_video = fmt_key
         app_settings.save(self._settings)
 
+        engine = sel.get("engine", "off")
+        crf_val = int(self.video_quality_combo.currentData()) if isinstance(self.video_quality_combo.currentData(), int) else 18
+        aud_bitrate = self.audio_bitrate_combo.currentText() or "192k"
+
+        # ---- AI (RIFE) path: three-stage pipeline on its own worker thread ----
+        if engine == "rife":
+            if not rife_setup.is_installed():
+                QMessageBox.warning(
+                    self, "RIFE not installed",
+                    "Install RIFE from the Speed dialog first (click the "
+                    "'Install RIFE' button in the Motion smoothing section)."
+                )
+                return
+            self._start_rife_pipeline(
+                out_path=out,
+                start=r_start, end=r_end,
+                speed=speed,
+                keep_audio=bool(sel["keep_audio"]),
+                target_fps=int(sel["interpolate_fps"]),
+                crf=crf_val,
+                audio_bitrate=aud_bitrate,
+            )
+            return
+
+        # ---- Classical / off: single-shot ffmpeg command ----
         job = sx.SpeedJob(
             input_path=self._current_file,
             output_path=out,
             start_seconds=r_start,
             end_seconds=r_end,
             speed=speed,
-            interpolate=bool(sel["interpolate"]),
+            interpolate=(engine == "minterpolate"),
             interpolate_fps=int(sel["interpolate_fps"]),
             keep_audio=bool(sel["keep_audio"]),
-            video_crf=int(self.video_quality_combo.currentData()) if isinstance(self.video_quality_combo.currentData(), int) else 18,
-            audio_bitrate=self.audio_bitrate_combo.currentText() or "192k",
+            video_crf=crf_val,
+            audio_bitrate=aud_bitrate,
             output_format=fmt_key,
         )
         cmd = sx.build_speed_cmd(job)
@@ -2011,9 +2038,98 @@ class MainWindow(QMainWindow):
         # the OUTPUT duration since ffmpeg's -progress reports output PTS.
         src_span = max(0.001, r_end - r_start)
         out_span = src_span / speed
-        label = ("Slow-mo" if speed < 1 else "Speed change") + (" (smooth)" if sel["interpolate"] else "")
+        if engine == "minterpolate":
+            label = "Slow-mo (classical)" if speed < 1 else "Speed change (smooth)"
+        else:
+            label = "Slow-mo" if speed < 1 else "Speed change"
         self._run_ffmpeg_async(cmd, total_duration=out_span,
                                output_path=out, label=label)
+
+    def _start_rife_pipeline(self, *, out_path: str, start: float, end: float,
+                             speed: float, keep_audio: bool, target_fps: int,
+                             crf: int, audio_bitrate: str) -> None:
+        """Kick off the three-stage RIFE pipeline in a QThread with progress."""
+        from PySide6.QtCore import QObject, QThread as _QThread, Signal as _Signal
+
+        job = rp.RifeSpeedJob(
+            input_path=self._current_file,
+            output_path=out_path,
+            start_seconds=start,
+            end_seconds=end,
+            speed=speed,
+            keep_audio=keep_audio,
+            target_fps=target_fps,
+            source_fps=self._media_info.fps if self._media_info else None,
+            video_crf=crf,
+            audio_bitrate=audio_bitrate,
+        )
+
+        class _Worker(QObject):
+            progress = _Signal(float)
+            status   = _Signal(str)
+            done_ok  = _Signal(str)
+            failed   = _Signal(str)
+            def __init__(self, job):
+                super().__init__()
+                self._job = job
+                self._cancel = False
+            def cancel(self): self._cancel = True
+            def run(self):
+                ok, msg = rp.run_rife_pipeline(
+                    self._job,
+                    on_progress=lambda f: self.progress.emit(f),
+                    on_status=lambda s: self.status.emit(s),
+                    should_cancel=lambda: self._cancel,
+                )
+                if ok:
+                    self.done_ok.emit(self._job.output_path)
+                else:
+                    self.failed.emit(msg)
+
+        thread = _QThread()
+        worker = _Worker(job)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def on_prog(f: float):
+            self.overall_bar.setValue(int(f * 1000))
+
+        def on_status(s: str):
+            self.status_label.setText(f"AI slo-mo: {s}")
+
+        def on_ok(path: str):
+            self.overall_bar.setValue(1000)
+            self.status_label.setText(f"AI slo-mo complete ✓  ·  {path}")
+            self.export_btn.setEnabled(True); self.export_btn.setText("Export")
+            self.cancel_btn.setVisible(False)
+            self._export_thread = None; self._export_worker = None
+            if self.open_folder_cb.isChecked():
+                self._open_folder(os.path.dirname(path) or path)
+            thread.quit()
+
+        def on_fail(msg: str):
+            self.export_btn.setEnabled(True); self.export_btn.setText("Export")
+            self.cancel_btn.setVisible(False)
+            self._export_thread = None; self._export_worker = None
+            QMessageBox.critical(self, "AI slo-mo failed", msg)
+            self.status_label.setText("AI slo-mo failed.")
+            thread.quit()
+
+        worker.progress.connect(on_prog)
+        worker.status.connect(on_status)
+        worker.done_ok.connect(on_ok)
+        worker.failed.connect(on_fail)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._export_thread = thread
+        self._export_worker = worker
+        self.export_btn.setEnabled(False)
+        self.export_btn.setText("AI slo-mo…")
+        self.cancel_btn.setVisible(True)
+        self.overall_bar.setValue(0)
+        self.status_label.setText("AI slo-mo: starting…")
+        thread.start()
 
     def _on_export_gif(self) -> None:
         if not self._media_info or not self._current_file:

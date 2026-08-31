@@ -198,6 +198,21 @@ def run_rife_pipeline(
         except OSError:
             pass
 
+    # -t/-ss placement matters: BEFORE -i limits input read; AFTER -i limits
+    # output write. We use BEFORE-i for both throughout, so atempo/PTS
+    # filters expand the 5s input into the correct longer output without
+    # ffmpeg then truncating it back.
+    def _log_diag(msg: str) -> None:
+        try:
+            log_path = os.path.join(tempfile.gettempdir(), "autosplit.log")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[rife] {msg}\n")
+        except Exception:
+            pass
+
+    _log_diag(f"START src_fps={src_fps} speed={job.speed} target_fps={job.target_fps} "
+              f"span={span:.3f}s multiplier={multiplier}")
+
     try:
         # ---- Stage 1: extract source frames ----
         if on_status: on_status(f"Extracting frames  ·  {src_fps:g} fps source")
@@ -205,8 +220,8 @@ def run_rife_pipeline(
             fu.ffmpeg_path(),
             "-y", "-hide_banner",
             "-ss", f"{job.start_seconds:.3f}",
+            "-t", f"{span:.3f}",              # BEFORE -i = limit input read
             "-i", job.input_path,
-            "-t", f"{span:.3f}",
             "-vsync", "0",
             "-qscale:v", "1", "-qmin", "1", "-qmax", "1",
             "-progress", "pipe:2",
@@ -219,9 +234,12 @@ def run_rife_pipeline(
         if rc != 0:
             return False, f"Extract failed:\n{tail[-1500:]}"
 
+        n_extracted = len([f for f in os.listdir(in_dir) if f.endswith(".png")])
+        _log_diag(f"stage1 extracted={n_extracted} frames")
+
         # ---- Stage 2: RIFE interpolation ----
         if on_status:
-            on_status(f"RIFE interpolation ×{multiplier}  ·  target {job.target_fps} fps")
+            on_status(f"RIFE ×{multiplier}  ·  target {job.target_fps} fps")
         rc, tail = _run_rife(
             str(rife_setup.rife_exe()), in_dir, out_dir,
             multiplier=multiplier, model_folder=job.model,
@@ -232,24 +250,31 @@ def run_rife_pipeline(
         if rc != 0:
             return False, f"RIFE failed:\n{tail[-1500:]}"
 
-        # ---- Stage 2.5: audio pass (parallel would be nicer; simple sequential) ----
+        n_produced = len([f for f in os.listdir(out_dir) if f.endswith(".png")])
+        _log_diag(f"stage2 RIFE produced={n_produced} frames (asked for {n_extracted * multiplier})")
+
+        # ---- Stage 2.5: audio pass ----
+        # NOTE: -ss and -t BEFORE -i so we cap the INPUT, then atempo expands
+        # that captured span into the longer output. If -t came AFTER -i,
+        # ffmpeg would truncate the post-atempo output back to `span` seconds.
         if job.keep_audio:
             atempo = _atempo_chain(job.speed)
             audio_cmd = [
                 fu.ffmpeg_path(),
                 "-y", "-hide_banner",
                 "-ss", f"{job.start_seconds:.3f}",
-                "-i", job.input_path,
                 "-t", f"{span:.3f}",
+                "-i", job.input_path,
                 "-vn",
             ]
             if atempo:
                 audio_cmd += ["-af", ",".join(atempo)]
             audio_cmd += ["-acodec", "pcm_s16le", audio_path]
+            _log_diag(f"stage2.5 audio atempo={atempo}")
             try:
                 subprocess.run(audio_cmd, capture_output=True, **fu._no_window_kwargs())
             except Exception:
-                pass  # non-fatal — we'll just export without audio
+                pass
 
         # ---- Stage 3: reassemble ----
         if on_status: on_status(f"Reassembling at {job.target_fps} fps")
@@ -271,20 +296,32 @@ def run_rife_pipeline(
             "-movflags", "+faststart",
         ]
         if have_audio:
-            reassemble_cmd += ["-c:a", "aac", "-b:a", job.audio_bitrate, "-shortest"]
+            # Do NOT use -shortest: video and audio should be equal length by
+            # construction. -shortest was masking bugs by aligning to the
+            # shorter (buggy) stream.
+            reassemble_cmd += ["-c:a", "aac", "-b:a", job.audio_bitrate]
         reassemble_cmd += [
             "-progress", "pipe:2",
             job.output_path,
         ]
 
-        # Output duration for progress: span / speed.
         out_total = span / max(0.001, job.speed)
+        _log_diag(f"stage3 reassemble target_fps={job.target_fps} "
+                  f"expected_out_duration={out_total:.3f}s frames_available={n_produced}")
         rc, tail = _run_progress(
             reassemble_cmd, total=out_total,
             cb=lambda f: on_progress(0.9 + 0.1 * f) if on_progress else None,
         )
         if rc != 0:
             return False, f"Reassemble failed:\n{tail[-1500:]}"
+
+        # Probe the actual output duration for the log.
+        try:
+            info = fu.probe(job.output_path)
+            _log_diag(f"OUTPUT duration={info.duration_seconds:.3f}s (expected {out_total:.3f}s)")
+        except Exception as e:
+            _log_diag(f"probe of output failed: {e}")
+
         if on_progress:
             on_progress(1.0)
         return True, job.output_path

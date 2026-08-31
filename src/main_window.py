@@ -356,6 +356,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         act_slomo = menu.addAction("Export with speed change / slow-motion…")
         act_slomo.triggered.connect(self._on_export_speed)
+        act_upscale = menu.addAction("Upscale to 4K / 8K (AI, GPU)…")
+        act_upscale.triggered.connect(self._on_export_upscale)
         act_gif = menu.addAction("Export as GIF…")
         act_gif.triggered.connect(self._on_export_gif)
         self.export_btn.setMenu(menu)
@@ -2129,6 +2131,125 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setVisible(True)
         self.overall_bar.setValue(0)
         self.status_label.setText("AI slo-mo: starting…")
+        thread.start()
+
+    def _on_export_upscale(self) -> None:
+        if not self._media_info or not self._current_file:
+            return
+        if not self._media_info.has_video:
+            QMessageBox.warning(self, "No video",
+                                "Upscaling needs a video source.")
+            return
+        in_s, out_s = self._current_range()
+
+        from upscale_dialog import UpscaleDialog
+        import seedvr2_pipeline as up
+
+        dlg = UpscaleDialog(
+            self._settings, self._current_file,
+            source_w=self._media_info.width or 1920,
+            source_h=self._media_info.height or 1080,
+            in_seconds=in_s, out_seconds=out_s, parent=self,
+        )
+        if dlg.exec() != UpscaleDialog.DialogCode.Accepted:
+            return
+        sel = dlg.selection()
+        out = sel["output_path"]
+        if not out:
+            QMessageBox.warning(self, "Missing filename", "Choose a save path.")
+            return
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+
+        if sel["range"] == "full":
+            r_start, r_end = 0.0, self._media_info.duration_seconds
+        else:
+            r_start, r_end = in_s, out_s
+
+        job = up.UpscaleJob(
+            input_path=self._current_file,
+            output_path=out,
+            start_seconds=r_start,
+            end_seconds=r_end,
+            target_w=int(sel["target_w"]),
+            target_h=int(sel["target_h"]),
+            model_kind=sel["model_kind"],
+            keep_audio=bool(sel["keep_audio"]),
+            source_fps=self._media_info.fps,
+            video_crf=int(self.video_quality_combo.currentData()) if isinstance(self.video_quality_combo.currentData(), int) else 18,
+            audio_bitrate=self.audio_bitrate_combo.currentText() or "192k",
+        )
+        self._start_upscale_pipeline(job)
+
+    def _start_upscale_pipeline(self, job) -> None:
+        """Run seedvr2_pipeline.run_upscale on its own QThread."""
+        from PySide6.QtCore import QObject, QThread as _QThread, Signal as _Signal
+        import seedvr2_pipeline as up
+
+        class _Worker(QObject):
+            progress = _Signal(float)
+            status   = _Signal(str)
+            done_ok  = _Signal(str)
+            failed   = _Signal(str)
+            def __init__(self, job):
+                super().__init__()
+                self._job = job
+                self._cancel = False
+            def cancel(self): self._cancel = True
+            def run(self):
+                ok, msg = up.run_upscale(
+                    self._job,
+                    on_progress=lambda f: self.progress.emit(f),
+                    on_status=lambda s: self.status.emit(s),
+                    should_cancel=lambda: self._cancel,
+                )
+                if ok:
+                    self.done_ok.emit(self._job.output_path)
+                else:
+                    self.failed.emit(msg)
+
+        thread = _QThread()
+        worker = _Worker(job)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def on_prog(f: float):
+            self.overall_bar.setValue(int(f * 1000))
+
+        def on_status(s: str):
+            self.status_label.setText(f"Upscale: {s}")
+
+        def on_ok(path: str):
+            self.overall_bar.setValue(1000)
+            self.status_label.setText(f"Upscale complete ✓  ·  {path}")
+            self.export_btn.setEnabled(True); self.export_btn.setText("Export")
+            self.cancel_btn.setVisible(False)
+            self._export_thread = None; self._export_worker = None
+            if self.open_folder_cb.isChecked():
+                self._open_folder(os.path.dirname(path) or path)
+            thread.quit()
+
+        def on_fail(msg: str):
+            self.export_btn.setEnabled(True); self.export_btn.setText("Export")
+            self.cancel_btn.setVisible(False)
+            self._export_thread = None; self._export_worker = None
+            QMessageBox.critical(self, "Upscale failed", msg)
+            self.status_label.setText("Upscale failed.")
+            thread.quit()
+
+        worker.progress.connect(on_prog)
+        worker.status.connect(on_status)
+        worker.done_ok.connect(on_ok)
+        worker.failed.connect(on_fail)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._export_thread = thread
+        self._export_worker = worker
+        self.export_btn.setEnabled(False)
+        self.export_btn.setText("Upscaling…")
+        self.cancel_btn.setVisible(True)
+        self.overall_bar.setValue(0)
+        self.status_label.setText("Upscale: starting…")
         thread.start()
 
     def _on_export_gif(self) -> None:

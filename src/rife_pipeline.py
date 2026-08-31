@@ -99,13 +99,24 @@ def _run_progress(cmd: list[str], total: float,
 def _run_rife(rife_exe: str, in_dir: str, out_dir: str,
               multiplier: int, model_folder: str,
               on_progress: Optional[Callable[[float], None]] = None) -> tuple[int, str]:
-    """Run rife-ncnn-vulkan. Progress is estimated by output-file counting."""
+    """Run rife-ncnn-vulkan.
+
+    IMPORTANT: `-n` in rife-ncnn-vulkan is the TOTAL target output frame
+    count — NOT a multiplier. Passing `-n 8` = "produce 8 frames total".
+    We compute the desired total as (input_count * multiplier).
+    """
+    input_files = sorted(f for f in os.listdir(in_dir) if f.endswith(".png"))
+    input_count = len(input_files)
+    if input_count < 2:
+        return 1, "RIFE needs at least 2 input frames."
+    target_count = input_count * multiplier
+
     cmd = [
         rife_exe,
         "-i", in_dir,
         "-o", out_dir,
         "-m", model_folder,
-        "-n", str(multiplier),
+        "-n", str(target_count),
         "-f", "%08d.png",
     ]
     proc = subprocess.Popen(
@@ -116,13 +127,11 @@ def _run_rife(rife_exe: str, in_dir: str, out_dir: str,
         bufsize=1,
         **fu._no_window_kwargs(),
     )
-    # Estimate progress by counting output pngs.
-    total_expected = len([f for f in os.listdir(in_dir) if f.endswith(".png")]) * multiplier
+    total_expected = target_count
     tail: list[str] = []
     assert proc.stderr is not None
     try:
         while proc.poll() is None:
-            # Coarse polling — RIFE processes frames in bursts.
             try:
                 produced = len([f for f in os.listdir(out_dir) if f.endswith(".png")])
                 if on_progress and total_expected > 0:
@@ -137,7 +146,6 @@ def _run_rife(rife_exe: str, in_dir: str, out_dir: str,
                         tail.pop(0)
             except Exception:
                 pass
-        # Drain remaining stderr.
         rest = proc.stderr.read()
         if rest:
             tail.append(rest)
@@ -145,6 +153,13 @@ def _run_rife(rife_exe: str, in_dir: str, out_dir: str,
         proc.wait()
     if on_progress:
         on_progress(1.0)
+
+    # Diagnostic: log final counts so we can see if RIFE honored the request.
+    try:
+        produced = len([f for f in os.listdir(out_dir) if f.endswith(".png")])
+        tail.append(f"\n[autosplit] rife: input={input_count} target={target_count} produced={produced}\n")
+    except OSError:
+        pass
     return proc.returncode, "".join(tail)
 
 

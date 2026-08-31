@@ -78,6 +78,18 @@ def _cmd_join_custom() -> str:
     return " ".join(parts)
 
 
+def _cmd_extract_first() -> str:
+    exe, prefix = _exe_and_scriptless_prefix()
+    parts = [_quote(exe)] + [_quote(p) for p in prefix] + ["--extract-first-frame", '"%1"']
+    return " ".join(parts)
+
+
+def _cmd_extract_last() -> str:
+    exe, prefix = _exe_and_scriptless_prefix()
+    parts = [_quote(exe)] + [_quote(p) for p in prefix] + ["--extract-last-frame", '"%1"']
+    return " ".join(parts)
+
+
 def _icon() -> str:
     if getattr(sys, "frozen", False):
         return sys.executable
@@ -122,9 +134,11 @@ def _write_subcommands() -> None:
     # Windows 11 hides the verb when >1 file is selected. "Single" for Split
     # since that operates on one file at a time.
     entries = [
-        ("01Split",        "Split…",              _cmd_split(),       "Single"),
-        ("02JoinQuick",    "Join (Quick)",        _cmd_join_quick(),  "Player"),
-        ("03JoinCustom",   "Join (Customize)…",   _cmd_join_custom(), "Player"),
+        ("01Split",           "Split…",                _cmd_split(),          "Single"),
+        ("02JoinQuick",       "Join (Quick)",          _cmd_join_quick(),     "Player"),
+        ("03JoinCustom",      "Join (Customize)…",     _cmd_join_custom(),    "Player"),
+        ("04ExtractFirst",    "Extract first frame",   _cmd_extract_first(),  "Player"),
+        ("05ExtractLast",     "Extract last frame",    _cmd_extract_last(),   "Player"),
     ]
     for name, muiverb, cmdline, multisel in entries:
         item = fr"{root}\shell\{name}"
@@ -205,9 +219,11 @@ def _main() -> int:
         print(f"Installed nested context menu for {len(exts)} extensions:")
         print("  " + " ".join(exts))
         print("Menu entries:")
-        print(f"  Split…              → {_cmd_split()}")
-        print(f"  Join (Quick)        → {_cmd_join_quick()}")
-        print(f"  Join (Customize)…   → {_cmd_join_custom()}")
+        print(f"  Split…                → {_cmd_split()}")
+        print(f"  Join (Quick)          → {_cmd_join_quick()}")
+        print(f"  Join (Customize)…     → {_cmd_join_custom()}")
+        print(f"  Extract first frame   → {_cmd_extract_first()}")
+        print(f"  Extract last frame    → {_cmd_extract_last()}")
     else:
         exts = uninstall()
         print(f"Removed context menu entries for {len(exts)} extensions.")

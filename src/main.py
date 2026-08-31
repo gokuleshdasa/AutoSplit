@@ -82,6 +82,8 @@ def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--join-custom", action="store_true")
     ap.add_argument("--join-quick", action="store_true")
+    ap.add_argument("--extract-first-frame", action="store_true")
+    ap.add_argument("--extract-last-frame", action="store_true")
     # Positional: the file passed by Explorer.
     ap.add_argument("path", nargs="?", default=None)
     return ap.parse_args()
@@ -91,6 +93,99 @@ def _set_icon(app: QApplication) -> None:
     icon_path = Path(__file__).resolve().parent.parent / "assets" / "app.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
+
+
+def _run_extract_frame_headless(path: str, which: str) -> int:
+    """Extract first or last frame of `path`, save next to it, exit.
+    No window, no QApplication — just ffmpeg. Errors surface via a
+    Windows message box (ctypes) rather than a Qt dialog."""
+    import subprocess
+    _log(f"extract_{which}_frame: path={path!r}")
+    if not path or not os.path.exists(path):
+        _msgbox_error(f"File not found:\n{path}")
+        return 1
+
+    # QSettings works without a QApplication; safe to import.
+    try:
+        from settings import load
+        from ffmpeg_utils import probe, _no_window_kwargs
+        from frame_extract import build_single_frame_cmd
+    except Exception as e:
+        _msgbox_error(f"Startup failed: {e}")
+        return 1
+
+    try:
+        info = probe(path)
+    except Exception as e:
+        _msgbox_error(f"Cannot read media:\n{path}\n\n{e}")
+        return 1
+    if info.duration_seconds <= 0:
+        _msgbox_error(f"{os.path.basename(path)} has zero duration.")
+        return 1
+    if not info.has_video:
+        _msgbox_error(f"{os.path.basename(path)} has no video track.")
+        return 1
+
+    s = load()
+    fmt = s.frame_format or "png"
+    folder = s.frame_output_dir.strip() if s.frame_output_dir else ""
+    if not folder or not os.path.isdir(folder):
+        folder = os.path.dirname(path) or os.getcwd()
+    base = os.path.splitext(os.path.basename(path))[0]
+
+    if which == "first":
+        # A tiny offset avoids a black opening frame on many encodes.
+        ts = 0.05 if info.duration_seconds > 0.1 else 0.0
+        suffix = "first"
+    else:
+        # WMF-style backoff: 2 frame periods before the end.
+        ts = max(0.0, info.duration_seconds - 2 * info.frame_period())
+        suffix = "last"
+
+    out = os.path.join(folder, f"{base}_{suffix}.{fmt}")
+    # Auto-increment on conflict so multi-select doesn't clobber.
+    if os.path.exists(out):
+        root, ext = os.path.splitext(out)
+        i = 2
+        while os.path.exists(f"{root} ({i}){ext}"):
+            i += 1
+        out = f"{root} ({i}){ext}"
+
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    cmd = build_single_frame_cmd(
+        input_path=path,
+        timestamp_seconds=ts,
+        output_path=out,
+        quality=int(s.frame_jpg_quality),
+    )
+    try:
+        proc = subprocess.run(cmd, capture_output=True, **_no_window_kwargs())
+    except FileNotFoundError as e:
+        _msgbox_error(f"ffmpeg not found:\n{e}")
+        return 1
+    if proc.returncode != 0:
+        tail = (proc.stderr or b"").decode(errors="replace")[-800:]
+        _msgbox_error(f"Extract {which} frame failed for:\n{path}\n\n{tail}")
+        return 1
+    _log(f"extract_{which}_frame: wrote {out}")
+    return 0
+
+
+def _msgbox_error(msg: str) -> None:
+    """Show an OS-native error dialog without needing a QApplication."""
+    _log(f"error: {msg[:200]}")
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            MB_ICONERROR = 0x10
+            MB_TOPMOST   = 0x40000
+            ctypes.windll.user32.MessageBoxW(
+                0, msg, "AutoSplit — Error", MB_ICONERROR | MB_TOPMOST
+            )
+        except Exception:
+            print(msg, file=sys.stderr)
+    else:
+        print(msg, file=sys.stderr)
 
 
 def _run_splitter(app: QApplication, initial: str | None) -> int:
@@ -148,6 +243,13 @@ def _run_join(app: QApplication, path: str | None, mode: str) -> int:
 def main() -> int:
     args = _parse_args()
     _log(f"startup argv={sys.argv}")
+
+    # Headless verbs — no QApplication needed.
+    if args.extract_first_frame:
+        return _run_extract_frame_headless(args.path, "first")
+    if args.extract_last_frame:
+        return _run_extract_frame_headless(args.path, "last")
+
     _install_crash_handlers()
 
     app = QApplication(sys.argv)

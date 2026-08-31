@@ -83,9 +83,11 @@ if (Test-Path -LiteralPath $SubCmdsRoot) { Remove-Item -Recurse -Force -LiteralP
 
 # Create the sub-commands.
 $Entries = @(
-    @{ Key = "01Split";      Verb = "Split&#8230;";              MultiSelect = "Single"; Args = '"%1"'                    },
-    @{ Key = "02JoinQuick";  Verb = "Join (Quick)";              MultiSelect = "Player"; Args = '--join-quick "%1"'       },
-    @{ Key = "03JoinCustom"; Verb = "Join (Customize)&#8230;";   MultiSelect = "Player"; Args = '--join-custom "%1"'      }
+    @{ Key = "01Split";         Verb = "Split&#8230;";              MultiSelect = "Single"; Args = '"%1"'                        },
+    @{ Key = "02JoinQuick";     Verb = "Join (Quick)";              MultiSelect = "Player"; Args = '--join-quick "%1"'           },
+    @{ Key = "03JoinCustom";    Verb = "Join (Customize)&#8230;";   MultiSelect = "Player"; Args = '--join-custom "%1"'          },
+    @{ Key = "04ExtractFirst";  Verb = "Extract first frame";       MultiSelect = "Player"; Args = '--extract-first-frame "%1"'  },
+    @{ Key = "05ExtractLast";   Verb = "Extract last frame";        MultiSelect = "Player"; Args = '--extract-last-frame "%1"'   }
 )
 # Fix up the &#8230; (ellipsis). Raw glyph is avoided so this file stays ASCII.
 foreach ($e in $Entries) { $e.Verb = $e.Verb -replace '&#8230;', [char]0x2026 }
@@ -289,7 +291,7 @@ Set-ItemProperty -Path $uninstKey -Name "UninstallString" -Value "powershell -Ex
 
 Write-Host ""
 Write-Host "Installed to: $InstallDir" -ForegroundColor Green
-Write-Host "Explorer menu: AutoSplit -> Split / Join (Quick) / Join (Customize)" -ForegroundColor Green
+Write-Host "Explorer menu: AutoSplit -> Split / Join Quick / Join Customize / Extract first frame / Extract last frame" -ForegroundColor Green
 Write-Host "Start Menu shortcut: AutoSplit" -ForegroundColor Green
 Write-Host ""
 Write-Host "Launch it now? (Y/N) " -NoNewline -ForegroundColor Cyan

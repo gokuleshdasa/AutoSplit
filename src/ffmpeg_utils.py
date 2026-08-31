@@ -291,6 +291,7 @@ def build_ffmpeg_command(
     output_format: str,           # key from FORMAT_CATALOG
     audio_bitrate: str = "192k",
     video_crf: int = 18,
+    click_fade_ms: float = 0.0,   # >0 = apply a fade-in/out on cut boundaries
 ) -> list[str]:
     """Build a frame-accurate re-encode command for a single segment.
 
@@ -355,6 +356,17 @@ def build_ffmpeg_command(
         cmd += ["-vn", "-c:a", "libvorbis", "-b:a", audio_bitrate]
     else:
         raise ValueError(f"Unsupported output format key: {key}")
+
+    # Optional: fade-in/out on cut boundaries so a mid-waveform cut doesn't
+    # produce an audible click. Only applied to formats that have audio.
+    if click_fade_ms and click_fade_ms > 0 and key not in ("wav",):
+        # Are we writing an audio-only container? Skip video streams for those.
+        fade_s = click_fade_ms / 1000.0
+        # Guard against segments shorter than 2x fade.
+        if segment.duration_seconds > 2.5 * fade_s:
+            fade_out_start = segment.duration_seconds - fade_s
+            af = f"afade=t=in:st=0:d={fade_s},afade=t=out:st={fade_out_start:.3f}:d={fade_s}"
+            cmd += ["-af", af]
 
     cmd += ["-progress", "pipe:2", segment.output_path]
     return cmd

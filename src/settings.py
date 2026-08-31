@@ -28,6 +28,10 @@ DEFAULT_KEYBINDINGS: Dict[str, tuple[str, str]] = {
     "speed_down":   ("Playback speed  ×0.5",             "["),
     "speed_up":     ("Playback speed  ×2",               "]"),
     "speed_reset":  ("Playback speed 1×",                "\\"),
+    "marker_in_left":   ("Nudge marker IN left",         "Alt+Left"),
+    "marker_in_right":  ("Nudge marker IN right",        "Alt+Right"),
+    "marker_out_left":  ("Nudge marker OUT left",        "Alt+Shift+Left"),
+    "marker_out_right": ("Nudge marker OUT right",       "Alt+Shift+Right"),
     "open_file":    ("Open file…",                      "Ctrl+O"),
     "preferences":  ("Preferences…",                    "Ctrl+,"),
 }
@@ -71,6 +75,10 @@ class AppSettings:
     # Prompt-vs-1-click behavior for the split-button menu items.
     prompt_before_frame_export: bool = True
     prompt_before_gif_export: bool = True
+    # Audio click prevention: apply a tiny fade-in/out at cut boundaries so
+    # sudden mid-waveform cuts don't produce a click. Uses ffmpeg afade filter.
+    click_free_cuts: bool = True
+    click_fade_ms: float = 5.0
 
 
 def _q() -> QSettings:
@@ -119,6 +127,8 @@ def load() -> AppSettings:
     s.gif_output_dir = q.value("gif_output_dir", s.gif_output_dir, type=str)
     s.prompt_before_frame_export = _to_bool(q.value("prompt_before_frame_export", s.prompt_before_frame_export))
     s.prompt_before_gif_export = _to_bool(q.value("prompt_before_gif_export", s.prompt_before_gif_export))
+    s.click_free_cuts = _to_bool(q.value("click_free_cuts", s.click_free_cuts))
+    s.click_fade_ms = float(q.value("click_fade_ms", s.click_fade_ms))
 
     # Keybindings — start from defaults, override with any saved.
     kb = {aid: default for aid, (_lbl, default) in DEFAULT_KEYBINDINGS.items()}
@@ -164,6 +174,8 @@ def save(s: AppSettings) -> None:
     q.setValue("gif_output_dir", s.gif_output_dir)
     q.setValue("prompt_before_frame_export", s.prompt_before_frame_export)
     q.setValue("prompt_before_gif_export", s.prompt_before_gif_export)
+    q.setValue("click_free_cuts", s.click_free_cuts)
+    q.setValue("click_fade_ms", s.click_fade_ms)
 
     q.beginGroup("keybindings")
     for aid, seq in s.keybindings.items():

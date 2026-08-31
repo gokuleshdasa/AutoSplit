@@ -525,6 +525,16 @@ class MainWindow(QMainWindow):
         row3.addWidget(self.batch_rename_btn)
         v.addLayout(row3)
 
+        # Fourth row: auto-detect.
+        row4 = QHBoxLayout()
+        row4.setSpacing(6)
+        self.autodetect_btn = QPushButton("Auto-detect scenes / silence…")
+        self.autodetect_btn.setToolTip(
+            "Scan the media for hard cuts or silences and seed markers from them.")
+        self.autodetect_btn.clicked.connect(self._on_auto_detect)
+        row4.addWidget(self.autodetect_btn)
+        v.addLayout(row4)
+
         self.markers_list = QListWidget()
         self.markers_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.markers_list.itemDoubleClicked.connect(self._on_rename_marker)
@@ -622,6 +632,15 @@ class MainWindow(QMainWindow):
         self.overwrite_cb = QCheckBox("Overwrite existing files (otherwise auto-rename)")
         self.overwrite_cb.setChecked(self._settings.overwrite_existing)
         g.addWidget(self.overwrite_cb)
+        self.click_free_cb = QCheckBox(
+            "Click-free audio cuts (5ms fade at boundaries)"
+        )
+        self.click_free_cb.setChecked(self._settings.click_free_cuts)
+        self.click_free_cb.setToolTip(
+            "Prevents the small 'click' you sometimes hear at a hard cut in "
+            "the middle of an audio wave, by adding a tiny 5ms fade-in/out at "
+            "each segment's boundaries.")
+        g.addWidget(self.click_free_cb)
         return gb
 
     def _wire_shortcuts(self) -> None:
@@ -647,6 +666,10 @@ class MainWindow(QMainWindow):
             "speed_down":     lambda: self._adjust_playback_rate(0.5),
             "speed_up":       lambda: self._adjust_playback_rate(2.0),
             "speed_reset":    lambda: self._set_playback_rate(1.0),
+            "marker_in_left":   lambda: self._nudge_marker_edge("in", -1),
+            "marker_in_right":  lambda: self._nudge_marker_edge("in", +1),
+            "marker_out_left":  lambda: self._nudge_marker_edge("out", -1),
+            "marker_out_right": lambda: self._nudge_marker_edge("out", +1),
             "open_file":      self._on_open_file,
             "preferences":    self._on_open_preferences,
         }
@@ -1289,6 +1312,61 @@ class MainWindow(QMainWindow):
         if not self._is_markers_mode():
             self.mode_markers_rb.setChecked(True)
 
+    def _on_auto_detect(self) -> None:
+        if not self._media_info or not self._current_file:
+            return
+        from auto_detect_dialog import AutoDetectDialog
+        from regions import Region
+
+        dlg = AutoDetectDialog(self._current_file,
+                               self._media_info.duration_seconds, self)
+        if dlg.exec() != AutoDetectDialog.DialogCode.Accepted:
+            return
+        found = dlg.selected_regions()
+        if not found:
+            return
+        # Ask before wiping current markers.
+        if self._regions:
+            ans = QMessageBox.question(
+                self, "Add markers",
+                f"Detected {len(found)} region(s).\n\n"
+                "Yes = replace current markers\nNo = append to current"
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                self._regions.clear()
+            elif ans != QMessageBox.StandardButton.No:
+                return
+        for start, end, name in found:
+            self._regions.append(Region(start=start, end=end, name=name))
+        self._refresh_markers_ui()
+        if not self._is_markers_mode():
+            self.mode_markers_rb.setChecked(True)
+        self.statusBar().showMessage(
+            f"Added {len(found)} markers from auto-detect.", 4000)
+
+    # --- selected-marker IN/OUT nudge ---------------------------------------
+    def _nudge_marker_edge(self, edge: str, sign: int) -> None:
+        """Shift the selected marker's IN or OUT by one step (respects snap)."""
+        idx = self._selected_marker_index()
+        if idx < 0 or not self._media_info:
+            return
+        reg = self._regions[idx]
+        step = self._media_info.frame_period() if self._snap_fine else 1.0
+        delta = sign * step
+        if edge == "in":
+            new_start = max(0.0, min(reg.end - 0.01, reg.start + delta))
+            reg.start = new_start
+        else:
+            new_end = max(reg.start + 0.01, min(self._media_info.duration_seconds,
+                                                reg.end + delta))
+            reg.end = new_end
+        self._refresh_markers_ui()
+        self.markers_list.setCurrentRow(idx)   # keep selection through refresh
+        self.statusBar().showMessage(
+            f"{reg.name or f'clip {idx + 1}'}  ·  "
+            f"{fmt_time(reg.start)} → {fmt_time(reg.end)}  "
+            f"({fmt_time(reg.duration)})", 2000)
+
     def _on_batch_rename_markers(self) -> None:
         if not self._regions:
             return
@@ -1648,6 +1726,8 @@ class MainWindow(QMainWindow):
             output_format=self._current_format(),
             audio_bitrate=self.audio_bitrate_combo.currentText() or "192k",
             video_crf=crf,
+            click_fade_ms=(self._settings.click_fade_ms
+                           if self._settings.click_free_cuts else 0.0),
         )
         thread, worker = start_export(job)
         self._export_thread = thread
@@ -2328,6 +2408,7 @@ class MainWindow(QMainWindow):
         s.close_after_export = self.close_after_cb.isChecked()
         s.open_folder_after_export = self.open_folder_cb.isChecked()
         s.overwrite_existing = self.overwrite_cb.isChecked()
+        s.click_free_cuts = self.click_free_cb.isChecked()
         app_settings.save(s)
 
     def _on_progress(self, seg_index: int, seg_frac: float, overall_frac: float) -> None:
@@ -2380,7 +2461,26 @@ class MainWindow(QMainWindow):
                         f"Export complete ✓  ·  {len(self._queue) - self._queue_index - 1} file(s) still queued")
                     return
 
-            if self.close_after_cb.isChecked():
+            # Belt-and-braces: check both isChecked() and checkState() so a
+            # third-party stylesheet or programmatic toggle can't spoof us into
+            # closing on an unchecked box. Also log the decision path.
+            fully_checked = (
+                self.close_after_cb.isChecked()
+                and self.close_after_cb.checkState() == Qt.CheckState.Checked
+            )
+            try:
+                import datetime, os as _os
+                p = _os.path.join(_os.environ.get("TEMP", "."), "autosplit.log")
+                with open(p, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"{datetime.datetime.now().isoformat(timespec='milliseconds')}  "
+                        f"export-finished  close_after_cb.isChecked={self.close_after_cb.isChecked()}  "
+                        f"checkState={self.close_after_cb.checkState()}  "
+                        f"decision={'CLOSE' if fully_checked else 'STAY'}\n"
+                    )
+            except Exception:
+                pass
+            if fully_checked:
                 QTimer.singleShot(500, self.close)
         else:
             self.status_label.setText("Export did not complete.")

@@ -16,6 +16,7 @@ class ExportJob:
     output_format: str
     audio_bitrate: str = "192k"
     video_crf: int = 18
+    click_fade_ms: float = 0.0
 
 
 class ExportWorker(QObject):
@@ -60,6 +61,7 @@ class ExportWorker(QObject):
                 output_format=self.job.output_format,
                 audio_bitrate=self.job.audio_bitrate,
                 video_crf=self.job.video_crf,
+                click_fade_ms=self.job.click_fade_ms,
             )
 
             def on_prog(t: float, _seg=seg):

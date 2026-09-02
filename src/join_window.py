@@ -662,9 +662,13 @@ class JoinWindow(QMainWindow):
         self._on_format_populate(has_video=ext_v, has_audio=ext_a)
         # Enable Export only when all probes have completed successfully.
         probing = any(c.info is None and not c.error for c in self._clips)
-        self.export_btn.setEnabled(n >= 1 and not probing)
+        unreadable = [c for c in self._clips if c.error]
+        self.export_btn.setEnabled(n >= 1 and not probing and not unreadable)
         if probing:
             self.export_btn.setToolTip("Waiting for file inspection to finish…")
+        elif unreadable:
+            self.export_btn.setToolTip(
+                f"{len(unreadable)} file(s) could not be read — remove them from the list to export.")
         else:
             self.export_btn.setToolTip("")
         self._refresh_badge()
@@ -677,6 +681,17 @@ class JoinWindow(QMainWindow):
         if n_total == 0:
             self.badge_label.setText("—")
             self.badge_label.setObjectName("Muted")
+            self.badge_label.style().unpolish(self.badge_label)
+            self.badge_label.style().polish(self.badge_label)
+            return
+
+        failed = [c for c in self._clips if c.error]
+        if failed:
+            # A failed probe never produces an info, so n_probed would stay
+            # below n_total forever; surface the terminal state first.
+            self.badge_label.setText(
+                f"⚠ {len(failed)} file(s) unreadable — remove them to export")
+            self.badge_label.setObjectName("WarnBadge")
             self.badge_label.style().unpolish(self.badge_label)
             self.badge_label.style().polish(self.badge_label)
             return
@@ -980,6 +995,13 @@ class JoinWindow(QMainWindow):
 
     def closeEvent(self, ev: QCloseEvent) -> None:
         if self._export_thread is not None:
+            if QMessageBox.question(
+                    self, "Join in progress",
+                    "The join is still running.\n\nCancel it and close AutoSplit?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                ev.ignore()
+                return
             self._export_thread.cancel()
         if self._collector is not None:
             try:

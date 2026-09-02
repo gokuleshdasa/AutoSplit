@@ -107,7 +107,7 @@ class QuickJoinDialog(QDialog):
         if not paths:
             self._error("No files were sent.")
             return
-        self.title.setText(f"<b>Joining {len(paths)} clip(s)…</b>")
+        self.title.setText(f"<b>Reading {len(paths)} selected file(s)…</b>")
         self._start_join(list(paths))
 
     def _start_join(self, paths: list[str]) -> None:
@@ -115,16 +115,38 @@ class QuickJoinDialog(QDialog):
         paths = ju.natural_sort(paths)
 
         infos = []
+        skipped = []
         for p in paths:
             try:
                 info = fu.probe(p)
                 if info.duration_seconds > 0:
                     infos.append(info)
+                    continue
             except Exception:
                 pass
+            skipped.append(p)
+
         if len(infos) < 2:
-            self._error("Need at least 2 valid media files to join.")
+            if skipped:
+                names = "\n".join(os.path.basename(p) for p in skipped[:12])
+                if len(skipped) > 12:
+                    names += f"\n… and {len(skipped) - 12} more"
+                self._error("The selected files could not be read:\n\n" + names)
+            else:
+                self._error("Need at least 2 valid media files to join.")
             return
+
+        if skipped:
+            names = "\n".join(os.path.basename(p) for p in skipped[:12])
+            if len(skipped) > 12:
+                names += f"\n… and {len(skipped) - 12} more"
+            self.title.setText(
+                f"<b>Joining {len(infos)} clip(s)…</b>  ({len(skipped)} skipped)")
+            QMessageBox.warning(
+                self, "Some files skipped",
+                f"{len(skipped)} selected file(s) could not be read and were skipped:\n\n{names}")
+        else:
+            self.title.setText(f"<b>Joining {len(infos)} clip(s)…</b>")
 
         compat = ju.check_compatibility(infos)
         # Pick container/format.

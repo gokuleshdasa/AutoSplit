@@ -1517,8 +1517,11 @@ class MainWindow(QMainWindow):
         thread, worker = start_waveform(path, width=2400, height=64)
         self._wave_thread = thread
         self._wave_worker = worker
-        worker.ready.connect(self._on_waveform_ready)
-        worker.failed.connect(self._on_waveform_failed)
+        # Bind the result to the file it was generated for: the previous
+        # worker may still be running (it blocks in subprocess.run) and would
+        # otherwise paint the old file's waveform onto the new one.
+        worker.ready.connect(lambda pm, p=path: self._on_waveform_ready(pm, p))
+        worker.failed.connect(lambda msg, p=path: self._on_waveform_failed(msg, p))
         worker.ready.connect(thread.quit)
         worker.failed.connect(thread.quit)
         worker.ready.connect(worker.deleteLater)
@@ -1536,10 +1539,14 @@ class MainWindow(QMainWindow):
         self._wave_thread = None
         self._wave_worker = None
 
-    def _on_waveform_ready(self, pixmap) -> None:
+    def _on_waveform_ready(self, pixmap, path: str) -> None:
+        if path != self._current_file:
+            return  # result from a file that was replaced meanwhile
         self.timeline.set_waveform(pixmap)
 
-    def _on_waveform_failed(self, msg: str) -> None:
+    def _on_waveform_failed(self, msg: str, path: str) -> None:
+        if path != self._current_file:
+            return
         self.statusBar().showMessage(f"Waveform: {msg}", 4000)
 
     # --- input handlers ----------------------------------------------------
@@ -1792,6 +1799,7 @@ class MainWindow(QMainWindow):
         returns QImages (thread-safe) and we convert to QPixmap here."""
         if not (self._media_info and self._current_file):
             return
+        source_file = self._current_file
         import subprocess, tempfile
         dur = self._media_info.duration_seconds
         if dur <= 0:
@@ -1851,6 +1859,8 @@ class MainWindow(QMainWindow):
         def _on_done(images):
             # Convert to QPixmap on the main GUI thread (QPixmap is not
             # thread-safe; QImage returned from the worker is).
+            if self._current_file != source_file:
+                return  # stale frames from a file that was replaced meanwhile
             try:
                 pixmaps = [QPixmap.fromImage(img) for img in images]
                 self.timeline.set_filmstrip_frames(pixmaps)
@@ -2498,6 +2508,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev: QCloseEvent) -> None:
         if self._export_worker:
+            if QMessageBox.question(
+                    self, "Export in progress",
+                    "An export is still running.\n\nCancel it and close AutoSplit?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                ev.ignore()
+                return
             self._export_worker.cancel()
         self._cancel_waveform()
         if self._collector is not None:
